@@ -1,4 +1,4 @@
-# Genere sce_sys/icon0.png (512x512) et sce_sys/pic1.png (1920x1080) pour le paquet PS4.
+# Generates sce_sys/icon0.png (512x512) and sce_sys/pic1.png (1920x1080) for the PS4 package.
 import os
 import sys
 from PIL import Image, ImageDraw, ImageFont
@@ -16,7 +16,7 @@ def font(size):
 
 
 def switch_logo(d, cx, cy, s):
-    # deux Joy-Con stylises (rouge neon / bleu neon) autour d'un ecran
+    # two stylised Joy-Cons (neon red / neon blue) around a screen
     w, h = int(150 * s), int(250 * s)
     d.rounded_rectangle([cx - w - 40 * s, cy - h // 2, cx - 40 * s, cy + h // 2], radius=int(60 * s), fill=(0, 190, 240))
     d.rounded_rectangle([cx + 40 * s, cy - h // 2, cx + w + 40 * s, cy + h // 2], radius=int(60 * s), fill=(255, 60, 40))

@@ -8,7 +8,8 @@
 
 #include <stb/stb_easy_font.h>
 
-#define NUM_BUFFERS 2
+// triple buffering: drawing never waits for the frame currently being flipped
+#define NUM_BUFFERS 3
 #define FB_SIZE (SCREEN_W * SCREEN_H * 4)
 
 static int g_video = -1;
@@ -21,12 +22,12 @@ bool gfx_init(void)
 {
     g_video = sceVideoOutOpen(ORBIS_VIDEO_USER_MAIN, ORBIS_VIDEO_OUT_BUS_MAIN, 0, 0);
     if (g_video < 0) {
-        log_printf("sceVideoOutOpen a echoue : %x", g_video);
+        log_printf("sceVideoOutOpen failed: %x", g_video);
         return false;
     }
 
     if (sceKernelCreateEqueue(&g_flip_queue, "sysdvr flip queue") < 0) {
-        log_printf("sceKernelCreateEqueue a echoue");
+        log_printf("sceKernelCreateEqueue failed");
         return false;
     }
     sceVideoOutAddFlipEvent(g_flip_queue, g_video, 0);
@@ -36,14 +37,14 @@ bool gfx_init(void)
     off_t phys = 0;
     int rc = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), total, align, 3, &phys);
     if (rc < 0) {
-        log_printf("sceKernelAllocateDirectMemory a echoue : %x", rc);
+        log_printf("sceKernelAllocateDirectMemory failed: %x", rc);
         return false;
     }
 
     void *mem = NULL;
     rc = sceKernelMapDirectMemory(&mem, total, 0x33, 0, phys, align);
     if (rc < 0) {
-        log_printf("sceKernelMapDirectMemory a echoue : %x", rc);
+        log_printf("sceKernelMapDirectMemory failed: %x", rc);
         return false;
     }
 
@@ -53,11 +54,11 @@ bool gfx_init(void)
     }
 
     OrbisVideoOutBufferAttribute attr;
-    // 0x80000000 = A8R8G8B8 sRGB, mode lineaire
+    // 0x80000000 = A8R8G8B8 sRGB, linear tiling
     sceVideoOutSetBufferAttribute(&attr, 0x80000000, 1, 0, SCREEN_W, SCREEN_H, SCREEN_W);
     rc = sceVideoOutRegisterBuffers(g_video, 0, (void **)g_buffers, NUM_BUFFERS, &attr);
     if (rc != 0) {
-        log_printf("sceVideoOutRegisterBuffers a echoue : %x", rc);
+        log_printf("sceVideoOutRegisterBuffers failed: %x", rc);
         return false;
     }
 
@@ -76,11 +77,11 @@ void gfx_flip(void)
     g_frame_id++;
     sceVideoOutSubmitFlip(g_video, g_current, ORBIS_VIDEO_OUT_FLIP_VSYNC, g_frame_id);
 
-    // attendre que ce buffer soit affiche : l'autre devient libre
+    // the next buffer was last shown NUM_BUFFERS - 1 flips ago: it is free once the previous flip has happened
     for (;;) {
         OrbisVideoOutFlipStatus st;
         sceVideoOutGetFlipStatus(g_video, &st);
-        if (st.flipArg >= g_frame_id)
+        if (st.flipArg >= g_frame_id - (NUM_BUFFERS - 2))
             break;
         OrbisKernelEvent evt;
         int count;
@@ -120,7 +121,7 @@ typedef struct {
 void gfx_text(uint32_t *fb, int x, int y, int scale, uint32_t color, const char *text)
 {
     static EasyFontVertex verts[4 * 2000];
-    // stb_easy_font n'est pas reentrant avec ce buffer statique : uniquement depuis le thread principal
+    // static vertex buffer: main thread only
     int quads = stb_easy_font_print(0, 0, (char *)text, NULL, verts, sizeof(verts));
     for (int q = 0; q < quads; q++) {
         EasyFontVertex *v = &verts[q * 4];

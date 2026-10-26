@@ -20,15 +20,14 @@ SysDVR-PS4 is a PS4 homebrew port of the [SysDVR](https://github.com/exelix11/Sy
 
 - 📡 **Automatic discovery:** finds the Switch on your network (SysDVR's UDP broadcast), no IP needed
 - 🎮 **Manual IP entry** with the controller if your network blocks broadcasts
-- 🎞️ **720p ~30 fps H.264**, hardware-agnostic software decoding (FFmpeg, multithreaded, SSE/AVX optimised for the PS4's Jaguar CPU)
+- 🎞️ **720p ~30 fps H.264**, software decoding (FFmpeg, multithreaded, SSE/AVX optimised for the PS4's Jaguar CPU)
+- ⚡ **Low latency:** the socket is always drained on its own thread, and if decoding falls behind the app skips to the next keyframe instead of piling up delay
 - 🖥️ **Fullscreen 1080p** (scaled) or **1:1 720p**
 - 🔊 **Audio**, 48 kHz stereo PCM with a low-latency jitter buffer
 - 🔁 **Auto-reconnects** if the Wi-Fi drops or the Switch goes to sleep
 - 💡 Option to **turn off the Switch's screen** while streaming (SysDVR 6.1+)
-- 📊 On-screen stats (fps, bitrate)
+- 📊 On-screen stats (fps, bitrate, decoder load, delay, skipped frames, audio buffer)
 - ⚙️ Settings saved to `/data/sysdvr-ps4/config.ini`
-
-The UI is in French (the author's language). Pull requests for translations are welcome.
 
 ## Requirements
 
@@ -61,7 +60,7 @@ The UI is in French (the author's language). Pull requests for translations are 
 | Button | Action |
 |---|---|
 | **OPTIONS** | Open / close the settings menu |
-| **△ Triangle** | Show / hide stats (fps, Mbit/s) |
+| **△ Triangle** | Show / hide stats (see [Stats overlay](#stats-overlay)) |
 | **□ Square** | Toggle fullscreen (1080p) / 1:1 (720p) |
 | **✕ Cross** | Reconnect (when not connected) |
 | **PS button** | Return to the PS4 home screen |
@@ -77,13 +76,29 @@ The file is created on first launch. Edit it over FTP or change the values from 
 | Key | Default | Description |
 |---|---|---|
 | `ip` | `auto` | Switch IP address, or `auto` for discovery |
-| `threads` | `3` | H.264 decoder threads (1–6). More threads are smoother but add about 1 frame of latency each. `1` gives the lowest latency. |
-| `fast` | `0` | `1` skips the deblocking filter. Much faster decoding, slightly blockier picture. |
+| `threads` | `2` | H.264 decoder threads (1–6). Each extra thread decodes faster but adds about 33 ms (one frame) of latency. `1` gives the lowest latency if your PS4 keeps up. |
+| `fast` | `0` | `1` skips the deblocking filter. Much faster decoding, slightly blockier picture. It is also switched on automatically while the decoder is catching up. |
+| `smooth` | `1` | Bilinear scaling. `0` uses the cheaper fast-bilinear scaler. |
+| `max_delay_ms` | `150` | When decoded video falls this far behind, queued frames are dropped and decoding restarts at the next keyframe. |
 | `audio` | `1` | Enable sound |
 | `fullscreen` | `1` | Scale to 1080p (`0` = native 720p, centred) |
 | `screen_off` | `0` | Turn off the Switch screen while streaming (SysDVR 6.1+) |
-| `audio_batch` | `2` | SysDVR audio batching (0–3) |
-| `audio_buffer_ms` | `80` | Target audio buffer. Raise it if the sound crackles, lower it for less delay. |
+| `audio_batch` | `0` | SysDVR audio batching (0–3). Each step adds ~21 ms of audio per packet, so `0` is the lowest latency. |
+| `audio_buffer_ms` | `60` | Target audio buffer. Raise it if the sound crackles, lower it for less delay. |
+
+Config files from 1.0 are upgraded automatically: `threads`, `audio_batch` and `audio_buffer_ms` are reset to the new low-latency defaults once.
+
+### Stats overlay
+
+Press **△** while streaming:
+
+| Field | Meaning |
+|---|---|
+| `fps` / `Mbit/s` | Frames decoded per second and stream bitrate |
+| `decode` | Average time the decoder thread spends per frame. Close to 33 ms means the PS4 is at its limit: try `fast` or more `threads`. |
+| `delay` | Extra delay of the shown frame compared to the fastest frame of this session (network + queue + decoding) |
+| `queue` / `skipped` | Frames waiting to be decoded / frames dropped to catch up. `skipped` going up all the time means the decoder is too slow. |
+| `audio` / `underruns` | Audio buffered right now / times the buffer ran dry (crackles). Raise `audio_buffer_ms` if `underruns` keeps going up. |
 
 A log is written to `/data/sysdvr-ps4/log.txt`.
 
@@ -91,13 +106,14 @@ A log is written to `/data/sysdvr-ps4/log.txt`.
 
 | Problem | Fix |
 |---|---|
-| Stuck on *"Recherche de la Switch…"* (searching) | Broadcasts may be blocked (guest Wi-Fi, AP isolation, mesh). Enter the Switch IP by hand (System Settings → Internet on the Switch). |
-| *"Reponse inattendue… TCP Bridge ?"* | SysDVR is in USB or RTSP mode. Switch it to **TCP Bridge**. |
-| *"Version de protocole SysDVR non supportee"* | Update SysDVR on the Switch to 5.5 or later. |
+| Stuck on *"Searching for the Switch on the network..."* | Broadcasts may be blocked (guest Wi-Fi, AP isolation, mesh). Enter the Switch IP by hand (System Settings → Internet on the Switch). |
+| *"Unexpected reply: is SysDVR in TCP Bridge mode?"* | SysDVR is in USB or RTSP mode. Switch it to **TCP Bridge**. |
+| *"Unsupported SysDVR protocol version"* | Update SysDVR on the Switch to 5.5 or later. |
 | Connected but black screen | Launch a game. The home menu isn't captured. |
-| Choppy video | Use Ethernet on the PS4, keep the Switch close to the router (5 GHz), try `fast = 1`, or set `threads` to 4. |
-| Too much latency | `threads = 1` or `2`, lower `audio_buffer_ms`. |
-| Crackling sound | Raise `audio_buffer_ms` to 120–200. |
+| Video freezes for a moment now and then | The decoder fell behind and skipped to the next keyframe (`skipped` goes up in the stats). Turn on *Fast decoding*, set `threads` to 3, or turn off *Smooth scaling*. |
+| Choppy video, `skipped` stays at 0 | Network problem: use Ethernet on the PS4 and keep the Switch close to the router (5 GHz). |
+| Too much latency | `threads = 1` (if `decode` stays well under 33 ms), lower `max_delay_ms` and `audio_buffer_ms`. |
+| Crackling sound | Raise `audio_buffer_ms` to 100–200. |
 
 ## How it works
 
@@ -112,9 +128,9 @@ On the PS4 side:
 | Module | Role |
 |---|---|
 | `src/sysdvr_proto.c` | Discovery, connect with timeout, handshake (proto 02/03), packet reading and resync |
-| `src/video.c` | Network thread → FFmpeg `libavcodec` H.264 decoder (frame threads) → `libswscale` YUV→BGRA scaling (sliced, multithreaded) written **directly** into the framebuffer |
-| `src/audio.c` | Network thread → ring buffer with drift/latency control → `sceAudioOut` (256-sample grains) |
-| `src/gfx.c` | `sceVideoOut` double-buffered 1920×1080 framebuffer, vsync flip, text rendering with `stb_easy_font` |
+| `src/video.c` | Network thread (always drains the socket) → packet queue with catch-up (drops to the next keyframe when it gets older than `max_delay_ms`) → decoder thread, FFmpeg `libavcodec` H.264 (frame threads, deblocking skipped while behind) → `libswscale` YUV→BGRA scaling (sliced, multithreaded) written **directly** into the framebuffer |
+| `src/audio.c` | Network thread → ring buffer with latency control → `sceAudioOut` (256-sample grains) |
+| `src/gfx.c` | `sceVideoOut` triple-buffered 1920×1080 framebuffer (a new frame never waits for the previous vsync), text rendering with `stb_easy_font` |
 | `src/main.c` | UI, DualShock 4 input, settings menu, IP editor, auto-discovery thread |
 | `src/util.c` | Logging, config file |
 
@@ -159,13 +175,20 @@ Output: `IV0000-SDVR00001_00-SYSDVRPS4CLIENT0.pkg`
 
 ### Testing
 
-`make test` builds the **real** `video.c`, `audio.c` and `sysdvr_proto.c` natively (PS4 APIs replaced by stubs in `tests/stubs`). It runs them against `tests/fake_switch.py`, a fake Switch that implements the SysDVR sysmodule side (UDP discovery, handshake 02/03, H.264 + PCM streaming):
+`make test` builds the **real** `video.c`, `audio.c` and `sysdvr_proto.c` natively (PS4 APIs replaced by stubs in `tests/stubs`). It runs them against `tests/fake_switch.py`, a fake Switch that implements the SysDVR sysmodule side (UDP discovery, handshake 02/03, H.264 + PCM streaming). It runs two scenarios:
+
+1. a normal decoder: nothing may be skipped, and the delay must stay low;
+2. a decoder made artificially too slow for the stream (`SYSDVR_TEST_DECODE_DELAY_MS=45`): frames must be skipped, and the delay must stay bounded instead of growing.
 
 ```sh
 sudo apt install ffmpeg libavcodec-dev libswscale-dev python3
 make test
-# ... Decouverte OK : 172.x.x.x serie=FAKE-SWITCH-0001
-# ... Images decodees=194 rendues=178 ... RESULTAT : OK
+# ==> Real-time decoder
+# ... frames decoded=255 rendered=239 skipped=0 ... delay avg=34 max=44 ms
+# RESULT: OK
+# ==> Decoder too slow for the stream (must skip frames, not build up latency)
+# ... skipped=124 ... delay avg=123 max=200 ms
+# RESULT: OK
 ```
 
 You can also run `python3 tests/fake_switch.py video.h264` on a PC and point the PS4 app at that PC's IP to test on a real PS4 without a Switch.

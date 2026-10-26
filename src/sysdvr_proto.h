@@ -1,5 +1,5 @@
 #pragma once
-// Implementation client du protocole SysDVR "TCP Bridge" (protocole 02 / 03).
+// Client implementation of the SysDVR "TCP Bridge" protocol (protocol 02 / 03).
 // Reference : https://github.com/exelix11/SysDVR/blob/master/protocol.md
 #include <stdint.h>
 #include <stdbool.h>
@@ -13,7 +13,7 @@
 #define SDVR_REQUEST_MAGIC  0xAAAAAAAAu
 #define SDVR_HANDSHAKE_OK   6
 
-// Taille max du contenu d'un paquet : max(VbufSz, AbufSz * (1 + MaxABatching))
+// Max packet payload: max(VbufSz, AbufSz * (1 + MaxABatching))
 #define SDVR_VBUF_SIZE      0x54000
 #define SDVR_ABUF_SIZE      0x1000
 #define SDVR_MAX_PAYLOAD    SDVR_VBUF_SIZE
@@ -31,18 +31,18 @@ enum {
 typedef struct {
     uint32_t Magic;
     uint32_t DataSize;
-    uint64_t Timestamp; // microsecondes
+    uint64_t Timestamp; // microseconds
     uint8_t  MetaData;
     uint8_t  ReplaySlot;
 } SdvrPacketHeader;
 
 typedef struct {
     uint32_t Magic;
-    uint16_t ProtoVer;     // deux caracteres ASCII, ex: '0','2'
+    uint16_t ProtoVer;     // two ASCII characters, e.g. '0','2'
     uint8_t  MetaFlags;    // 1 = video, 2 = audio
     uint8_t  VideoFlags;   // 1 = NalHash, 2 = InjectPPSSPS, 4 = NalHashOnlyIDR
     uint8_t  AudioBatching;
-    uint8_t  FeatureFlags; // 1 = eteindre l'ecran (proto 03)
+    uint8_t  FeatureFlags; // 1 = turn off the screen (proto 03)
     uint8_t  Reserved[6];
 } SdvrHandshakeRequest;
 #pragma pack(pop)
@@ -56,25 +56,31 @@ typedef struct {
     bool turn_off_screen;
 } SdvrHandshakeOptions;
 
-// SPS/PPS par defaut du flux de la Switch (copie du client officiel)
+// Default SPS/PPS of the Switch stream (same as the official client)
 extern const uint8_t SDVR_SPS[20];
 extern const uint8_t SDVR_PPS[8];
 
-// Connexion TCP avec timeout. Retourne le fd ou -1.
+// TCP connect with timeout. Returns the fd or -1.
 int sdvr_connect(const char *ip, int port, int timeout_ms, char *err, size_t errlen);
 
-// Effectue le handshake. Retourne 0 si OK.
+// Performs the handshake. Returns 0 on success.
 int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t errlen);
 
-// Lit le prochain paquet. buf doit faire au moins SDVR_MAX_PAYLOAD octets.
-// Retourne 1 si un paquet a ete lu, 0 si timeout (aucune donnee), -1 en cas d'erreur/deconnexion.
-// *stop est verifie a chaque timeout pour permettre d'interrompre.
+// Reads the next packet header (resyncs on garbage).
+// Returns 1 if a header was read, 0 on timeout (no data), -1 on error/disconnect.
+// *stop is checked on every timeout so the read can be interrupted.
+int sdvr_read_header(int fd, SdvrPacketHeader *hdr, volatile bool *stop);
+
+// Reads exactly size payload bytes. Returns 1 on success, -1 on error.
+int sdvr_read_payload(int fd, uint8_t *buf, uint32_t size, volatile bool *stop);
+
+// Header + payload. buf must hold at least SDVR_MAX_PAYLOAD bytes. Same return values as sdvr_read_header.
 int sdvr_read_packet(int fd, SdvrPacketHeader *hdr, uint8_t *buf, volatile bool *stop);
 
-// Ecoute les annonces UDP de la Switch. Retourne 1 si trouvee (ip/serial remplis), 0 sinon.
+// Listens for the Switch's UDP announcements. Returns 1 if found (ip/serial filled in), 0 otherwise.
 int sdvr_discover(int timeout_ms, char *ip, size_t iplen, char *serial, size_t seriallen);
 
-// Formate un paquet d'erreur envoye par la console
+// Formats an error packet sent by the console
 void sdvr_format_error(const uint8_t *data, uint32_t size, char *out, size_t outlen);
 
 void sdvr_close(int fd);

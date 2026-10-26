@@ -9,17 +9,18 @@
 #include <orbis/AudioOut.h>
 #include <orbis/UserService.h>
 
-// La Switch envoie du PCM 16 bits stereo 48 kHz
+// The Switch sends 16-bit stereo PCM at 48 kHz
 #define SAMPLE_RATE      48000
 #define BYTES_PER_FRAME  4
 #define OUT_GRAIN        256
 #define OUT_CHUNK        (OUT_GRAIN * BYTES_PER_FRAME)
-#define RING_SIZE        (SAMPLE_RATE * BYTES_PER_FRAME) // 1 seconde
+#define RING_SIZE        (SAMPLE_RATE * BYTES_PER_FRAME) // 1 second
 
 static pthread_t g_net_thread, g_out_thread;
 static pthread_mutex_t g_ring_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t g_ring[RING_SIZE];
 static size_t g_ring_read, g_ring_fill;
+static bool g_primed;
 static volatile int g_sock = -1;
 
 void audio_kick(void)
@@ -34,7 +35,8 @@ static size_t ms_to_bytes(int ms)
     return (size_t)SAMPLE_RATE * ms / 1000 * BYTES_PER_FRAME;
 }
 
-static void ring_push(const uint8_t *data, size_t len, size_t max_fill)
+// target = buffer level to aim for; anything above target + headroom is dropped
+static void ring_push(const uint8_t *data, size_t len, size_t target, size_t headroom)
 {
     pthread_mutex_lock(&g_ring_lock);
     if (len > RING_SIZE) {
@@ -53,23 +55,23 @@ static void ring_push(const uint8_t *data, size_t len, size_t max_fill)
             g_ring_fill = RING_SIZE;
         }
     }
-    // trop de retard accumule : on jette le plus ancien pour garder une latence faible
-    if (g_ring_fill > max_fill) {
-        size_t drop = (g_ring_fill - max_fill / 2) & ~(size_t)(BYTES_PER_FRAME - 1);
+    // too much delay piled up (network burst): drop the oldest samples to get back to the target
+    if (g_primed && g_ring_fill > target + headroom) {
+        size_t drop = (g_ring_fill - target) & ~(size_t)(BYTES_PER_FRAME - 1);
         g_ring_read = (g_ring_read + drop) % RING_SIZE;
         g_ring_fill -= drop;
     }
+    g_app.audio_fill_ms = (uint32_t)(g_ring_fill * 1000 / (SAMPLE_RATE * BYTES_PER_FRAME));
     pthread_mutex_unlock(&g_ring_lock);
 }
 
 static bool ring_pop(uint8_t *out, size_t len, size_t prime)
 {
-    static bool primed = false;
     bool ok = false;
     pthread_mutex_lock(&g_ring_lock);
-    if (!primed && g_ring_fill >= prime)
-        primed = true;
-    if (primed && g_ring_fill >= len) {
+    if (!g_primed && g_ring_fill >= prime)
+        g_primed = true;
+    if (g_primed && g_ring_fill >= len) {
         for (size_t i = 0; i < len;) {
             size_t n = RING_SIZE - g_ring_read;
             if (n > len - i) n = len - i;
@@ -79,8 +81,10 @@ static bool ring_pop(uint8_t *out, size_t len, size_t prime)
         }
         g_ring_fill -= len;
         ok = true;
-    } else if (primed) {
-        primed = false; // sous-alimentation : on attend de remplir a nouveau
+    } else if (g_primed) {
+        // underrun: wait until the buffer is back at the target
+        g_primed = false;
+        g_app.audio_underruns++;
     }
     pthread_mutex_unlock(&g_ring_lock);
     return ok;
@@ -90,6 +94,7 @@ static void ring_reset(void)
 {
     pthread_mutex_lock(&g_ring_lock);
     g_ring_read = g_ring_fill = 0;
+    g_primed = false;
     pthread_mutex_unlock(&g_ring_lock);
 }
 
@@ -98,16 +103,15 @@ static void *audio_out_thread(void *arg)
     (void)arg;
     int handle = sceAudioOutOpen(ORBIS_USER_SERVICE_USER_ID_SYSTEM, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 0, OUT_GRAIN, SAMPLE_RATE, ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
     if (handle <= 0) {
-        log_printf("sceAudioOutOpen a echoue : %x", handle);
+        log_printf("sceAudioOutOpen failed: %x", handle);
         return NULL;
     }
 
     static uint8_t chunk[OUT_CHUNK] __attribute__((aligned(64)));
     while (!g_app.quit) {
-        int prime_ms = g_app.cfg.audio_buffer_ms / 2;
-        if (!ring_pop(chunk, OUT_CHUNK, ms_to_bytes(prime_ms)))
+        if (!ring_pop(chunk, OUT_CHUNK, ms_to_bytes(g_app.cfg.audio_buffer_ms)))
             memset(chunk, 0, OUT_CHUNK);
-        // bloque jusqu'a ce que le materiel soit pret : cadence la lecture
+        // blocks until the hardware is ready: this paces playback
         sceAudioOutOutput(handle, chunk);
     }
     sceAudioOutOutput(handle, NULL);
@@ -150,7 +154,7 @@ static void *audio_net_thread(void *arg)
             fd = -1;
         }
         if (fd < 0) {
-            log_printf("Audio : %s", err);
+            log_printf("Audio: %s", err);
             set_state(LINK_ERROR);
             for (int i = 0; i < 20 && !g_app.quit && g_app.generation == gen; i++)
                 sleep_ms(100);
@@ -158,23 +162,24 @@ static void *audio_net_thread(void *arg)
         }
 
         g_sock = fd;
-        log_printf("Audio connecte a %s", ip);
+        log_printf("Audio connected to %s", ip);
         set_state(LINK_STREAMING);
         ring_reset();
 
-        size_t max_fill = ms_to_bytes(cfg.audio_buffer_ms * 2);
+        // one Switch packet is 1024 * (1 + batch) samples; allow two of them on top of the target before dropping
+        size_t packet = ms_to_bytes(1000 * 1024 * (1 + cfg.audio_batch) / SAMPLE_RATE);
         volatile bool stop = false;
         SdvrPacketHeader hdr;
         while (!g_app.quit && g_app.generation == gen && g_app.cfg.audio) {
             int rc = sdvr_read_packet(fd, &hdr, buf, &stop);
             if (rc < 0) {
-                log_printf("Audio : connexion perdue");
+                log_printf("Audio: connection lost");
                 break;
             }
             if (rc == 0)
                 continue;
             if ((hdr.MetaData & SDVR_META_AUDIO) && !(hdr.MetaData & SDVR_META_ERROR) && hdr.DataSize > 0)
-                ring_push(buf, hdr.DataSize & ~(uint32_t)(BYTES_PER_FRAME - 1), max_fill);
+                ring_push(buf, hdr.DataSize & ~(uint32_t)(BYTES_PER_FRAME - 1), ms_to_bytes(g_app.cfg.audio_buffer_ms), 2 * packet + ms_to_bytes(20));
         }
 
         g_sock = -1;
@@ -188,7 +193,7 @@ static void *audio_net_thread(void *arg)
 bool audio_start(void)
 {
     if (sceAudioOutInit() != 0) {
-        log_printf("sceAudioOutInit a echoue");
+        log_printf("sceAudioOutInit failed");
         return false;
     }
     if (pthread_create(&g_out_thread, NULL, audio_out_thread, NULL) != 0)

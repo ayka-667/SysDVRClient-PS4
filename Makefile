@@ -4,7 +4,7 @@
 # Variables: OO_PS4_TOOLCHAIN (OpenOrbis toolchain), FFMPEG (PS4 FFmpeg build, see toolchain/build_ffmpeg.sh)
 
 TITLE       := SysDVR PS4
-VERSION     := 1.00
+VERSION     := 1.10
 TITLE_ID    := SDVR00001
 CONTENT_ID  := IV0000-SDVR00001_00-SYSDVRPS4CLIENT0
 
@@ -68,9 +68,12 @@ $(BUILD):
 TEST_H264 ?= $(BUILD)/test.h264
 test:
 	mkdir -p $(BUILD)
-	gcc -O1 -g -Wall -Wno-unused-function -Itests/stubs -o $(BUILD)/harness tests/harness.c src/video.c src/audio.c src/sysdvr_proto.c -lavcodec -lswscale -lavutil -lpthread
-	[ -f $(TEST_H264) ] || ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=30 -t 8 -c:v libx264 -profile:v high -bf 0 -g 60 -b:v 5M -f h264 $(TEST_H264)
+	gcc -O1 -g -Wall -Wno-unused-function -DSYSDVR_TEST -Itests/stubs -o $(BUILD)/harness tests/harness.c src/video.c src/audio.c src/sysdvr_proto.c -lavcodec -lswscale -lavutil -lpthread
+	[ -f $(TEST_H264) ] || ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=30 -t 8 -c:v libx264 -profile:v high -bf 0 -g 30 -b:v 5M -f h264 $(TEST_H264)
+	@echo "==> Real-time decoder"
 	python3 tests/fake_switch.py $(TEST_H264) & PID=$$!; sleep 1; cd $(BUILD) && ./harness; RC=$$?; kill $$PID; exit $$RC
+	@echo "==> Decoder too slow for the stream (must skip frames, not build up latency)"
+	python3 tests/fake_switch.py $(TEST_H264) & PID=$$!; sleep 1; cd $(BUILD) && SYSDVR_TEST_DECODE_DELAY_MS=45 ./harness; RC=$$?; kill $$PID; exit $$RC
 
 clean:
 	rm -rf $(BUILD) eboot.bin pkg.gp4 sce_sys/param.sfo $(CONTENT_ID).pkg

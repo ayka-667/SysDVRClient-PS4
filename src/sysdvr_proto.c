@@ -39,13 +39,13 @@ int sdvr_connect(const char *ip, int port, int timeout_ms, char *err, size_t err
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)port);
     if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
-        snprintf(err, errlen, "Adresse IP invalide : %s", ip);
+        snprintf(err, errlen, "Invalid IP address: %s", ip);
         return -1;
     }
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        snprintf(err, errlen, "socket() a echoue : %s", strerror(errno));
+        snprintf(err, errlen, "socket() failed: %s", strerror(errno));
         return -1;
     }
 
@@ -54,7 +54,7 @@ int sdvr_connect(const char *ip, int port, int timeout_ms, char *err, size_t err
     int rcvbuf = 2 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
-    // connect non bloquant pour pouvoir appliquer un timeout
+    // non-blocking connect so a timeout can be applied
     int flags = fcntl(fd, F_GETFL, 0);
     bool nonblock = flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 
@@ -66,7 +66,7 @@ int sdvr_connect(const char *ip, int port, int timeout_ms, char *err, size_t err
         struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
         rc = select(fd + 1, NULL, &wfds, NULL, &tv);
         if (rc <= 0) {
-            snprintf(err, errlen, "Pas de reponse de %s:%d", ip, port);
+            snprintf(err, errlen, "No answer from %s:%d", ip, port);
             close(fd);
             return -1;
         }
@@ -74,7 +74,7 @@ int sdvr_connect(const char *ip, int port, int timeout_ms, char *err, size_t err
         socklen_t len = sizeof(soerr);
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len);
         if (soerr != 0) {
-            snprintf(err, errlen, "Connexion a %s:%d refusee (%s)", ip, port, strerror(soerr));
+            snprintf(err, errlen, "Connection to %s:%d refused (%s)", ip, port, strerror(soerr));
             close(fd);
             return -1;
         }
@@ -82,7 +82,7 @@ int sdvr_connect(const char *ip, int port, int timeout_ms, char *err, size_t err
     }
 
     if (rc != 0) {
-        snprintf(err, errlen, "Connexion a %s:%d impossible (%s)", ip, port, strerror(errno));
+        snprintf(err, errlen, "Cannot connect to %s:%d (%s)", ip, port, strerror(errno));
         close(fd);
         return -1;
     }
@@ -95,7 +95,7 @@ int sdvr_connect(const char *ip, int port, int timeout_ms, char *err, size_t err
     return fd;
 }
 
-// Lit exactement len octets. Retourne 1 ok, 0 timeout sans aucun octet lu (si allow_idle), -1 erreur.
+// Reads exactly len bytes. Returns 1 on success, 0 on timeout with nothing read (if allow_idle), -1 on error.
 static int read_full(int fd, void *dst, size_t len, volatile bool *stop, bool allow_idle, int max_idle_s)
 {
     uint8_t *p = (uint8_t *)dst;
@@ -113,7 +113,7 @@ static int read_full(int fd, void *dst, size_t len, volatile bool *stop, bool al
             continue;
         }
         if (n == 0)
-            return -1; // connexion fermee
+            return -1; // connection closed
 
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ETIMEDOUT) {
             if (got == 0 && allow_idle)
@@ -131,12 +131,12 @@ int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t er
 {
     char hello[10];
     if (read_full(fd, hello, sizeof(hello), NULL, false, 5) != 1) {
-        snprintf(err, errlen, "La Switch n'a pas envoye le message d'accueil SysDVR");
+        snprintf(err, errlen, "The Switch did not send the SysDVR hello");
         return -1;
     }
 
     if (memcmp(hello, "SysDVR|", 7) != 0 || hello[9] != 0) {
-        snprintf(err, errlen, "Reponse inattendue : ce n'est pas SysDVR en mode TCP Bridge ?");
+        snprintf(err, errlen, "Unexpected reply: is SysDVR in TCP Bridge mode?");
         return -1;
     }
 
@@ -144,7 +144,7 @@ int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t er
     bool v2 = v0 == '0' && v1 == '2';
     bool v3 = v0 == '0' && v1 == '3';
     if (!v2 && !v3) {
-        snprintf(err, errlen, "Version de protocole SysDVR non supportee (%c%c). Mets a jour SysDVR.", v0, v1);
+        snprintf(err, errlen, "Unsupported SysDVR protocol version (%c%c). Update SysDVR.", v0, v1);
         return -1;
     }
 
@@ -153,20 +153,20 @@ int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t er
     req.Magic = SDVR_REQUEST_MAGIC;
     req.ProtoVer = (uint16_t)((uint8_t)v0 | ((uint8_t)v1 << 8));
     req.MetaFlags = opt->video ? 1 : 2;
-    req.VideoFlags = 2; // InjectPPSSPS, pas de replay de NAL
+    req.VideoFlags = 2; // InjectPPSSPS, no NAL replay
     req.AudioBatching = (uint8_t)opt->audio_batching;
     if (v3 && opt->turn_off_screen)
         req.FeatureFlags |= 1;
 
     if (send(fd, &req, sizeof(req), 0) != (ssize_t)sizeof(req)) {
-        snprintf(err, errlen, "Envoi du handshake impossible");
+        snprintf(err, errlen, "Could not send the handshake");
         return -1;
     }
 
     uint8_t resp[72];
     size_t resp_len = v3 ? 72 : 4;
     if (read_full(fd, resp, resp_len, NULL, false, 5) != 1) {
-        snprintf(err, errlen, "Pas de reponse au handshake");
+        snprintf(err, errlen, "No handshake response");
         return -1;
     }
 
@@ -174,21 +174,21 @@ int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t er
     memcpy(&code, resp, 4);
     if (code != SDVR_HANDSHAKE_OK) {
         if (code == 1)
-            snprintf(err, errlen, "Version refusee par la Switch : mets a jour SysDVR");
+            snprintf(err, errlen, "Version rejected by the Switch: update SysDVR");
         else
-            snprintf(err, errlen, "Handshake refuse par la Switch (code %u)", code);
+            snprintf(err, errlen, "Handshake rejected by the Switch (code %u)", code);
         return -1;
     }
     return 0;
 }
 
-int sdvr_read_packet(int fd, SdvrPacketHeader *hdr, uint8_t *buf, volatile bool *stop)
+int sdvr_read_header(int fd, SdvrPacketHeader *hdr, volatile bool *stop)
 {
     int rc = read_full(fd, hdr, sizeof(*hdr), stop, true, 10);
     if (rc != 1)
         return rc;
 
-    // resynchronisation si le header est corrompu : chercher CC CC CC CC
+    // resync if the header is corrupted: look for CC CC CC CC
     int resync_budget = 4 * 1024 * 1024;
     while (hdr->Magic != SDVR_PACKET_MAGIC || hdr->DataSize > SDVR_MAX_PAYLOAD) {
         if (--resync_budget <= 0)
@@ -198,12 +198,22 @@ int sdvr_read_packet(int fd, SdvrPacketHeader *hdr, uint8_t *buf, volatile bool 
         if (rc != 1)
             return -1;
     }
+    return 1;
+}
 
-    if (hdr->DataSize == 0)
+int sdvr_read_payload(int fd, uint8_t *buf, uint32_t size, volatile bool *stop)
+{
+    if (size == 0)
         return 1;
+    return read_full(fd, buf, size, stop, false, 10) == 1 ? 1 : -1;
+}
 
-    rc = read_full(fd, buf, hdr->DataSize, stop, false, 10);
-    return rc == 1 ? 1 : -1;
+int sdvr_read_packet(int fd, SdvrPacketHeader *hdr, uint8_t *buf, volatile bool *stop)
+{
+    int rc = sdvr_read_header(fd, hdr, stop);
+    if (rc != 1)
+        return rc;
+    return sdvr_read_payload(fd, buf, hdr->DataSize, stop);
 }
 
 int sdvr_discover(int timeout_ms, char *ip, size_t iplen, char *serial, size_t seriallen)
@@ -237,8 +247,8 @@ int sdvr_discover(int timeout_ms, char *ip, size_t iplen, char *serial, size_t s
     socklen_t fromlen = sizeof(from);
     ssize_t n = recvfrom(fd, pkt, sizeof(pkt) - 1, 0, (struct sockaddr *)&from, &fromlen);
     if (n > 0) {
-        pkt[n] = 0; // la chaine s'arrete au premier NUL
-        // format : SysDVR|<version>|<proto>|<serial>
+        pkt[n] = 0; // the string ends at the first NUL
+        // format: SysDVR|<version>|<proto>|<serial>
         if (strncmp(pkt, "SysDVR|", 7) == 0) {
             char *ver = pkt + 7;
             char *proto = strchr(ver, '|');
@@ -261,7 +271,7 @@ int sdvr_discover(int timeout_ms, char *ip, size_t iplen, char *serial, size_t s
 void sdvr_format_error(const uint8_t *data, uint32_t size, char *out, size_t outlen)
 {
     if (size < 8) {
-        snprintf(out, outlen, "Erreur inconnue de la console");
+        snprintf(out, outlen, "Unknown console error");
         return;
     }
     uint32_t type, code;
@@ -272,12 +282,12 @@ void sdvr_format_error(const uint8_t *data, uint32_t size, char *out, size_t out
         memcpy(&ctx1, data + 8, 8);
 
     switch (type) {
-    case 1: snprintf(out, outlen, "Capture video echouee (0x%x)", code); break;
+    case 1: snprintf(out, outlen, "Video capture failed (0x%x)", code); break;
     case 2:
-    case 3: snprintf(out, outlen, "Capture audio echouee (0x%x)", code); break;
-    case 4: snprintf(out, outlen, "grc:d (video) a echoue (0x%x)", code); break;
-    case 5: snprintf(out, outlen, "grc:d (audio) a echoue (0x%x)", code); break;
-    default: snprintf(out, outlen, "Erreur console 0x%x / 0x%x", type, code); break;
+    case 3: snprintf(out, outlen, "Audio capture failed (0x%x)", code); break;
+    case 4: snprintf(out, outlen, "grc:d (video) failed (0x%x)", code); break;
+    case 5: snprintf(out, outlen, "grc:d (audio) failed (0x%x)", code); break;
+    default: snprintf(out, outlen, "Console error 0x%x / 0x%x", type, code); break;
     }
     (void)ctx1;
 }

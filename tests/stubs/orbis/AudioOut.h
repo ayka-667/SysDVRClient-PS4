@@ -1,4 +1,4 @@
-// Stub natif de sceAudioOut pour tester audio.c sur PC
+// Native sceAudioOut stub to test audio.c on a PC
 #pragma once
 #include <stdint.h>
 #include <unistd.h>

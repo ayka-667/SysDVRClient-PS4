@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fausse Switch qui imite le sysmodule SysDVR en mode TCP Bridge (protocole 02/03).
+"""Fake Switch that mimics the SysDVR sysmodule in TCP Bridge mode (protocol 02/03).
 
-Sert a tester le client PS4 (ou le harness natif) sans console.
-Usage : python3 fake_switch.py fichier.h264 [--proto 02|03] [--no-broadcast]
+Used to test the PS4 client (or the native harness) without a console.
+Usage: python3 fake_switch.py file.h264 [--proto 02|03] [--no-broadcast]
 """
 import argparse
 import math
@@ -16,7 +16,7 @@ REQ = struct.Struct("<IHBBBB6s")
 
 
 def split_access_units(data):
-    """Decoupe un flux H.264 Annex B en unites d'acces (une image par paquet, comme grc:d)."""
+    """Splits an Annex B H.264 stream into access units (one frame per packet, like grc:d)."""
     starts = []
     i = 0
     while True:
@@ -50,11 +50,11 @@ def handshake(conn, proto, expect_meta):
     while len(req) < 16:
         chunk = conn.recv(16 - len(req))
         if not chunk:
-            raise ConnectionError("client parti pendant le handshake")
+            raise ConnectionError("client left during the handshake")
         req += chunk
     magic, ver, meta, vflags, abatch, feat, _ = REQ.unpack(req)
     ok = magic == 0xAAAAAAAA and ver == (ord(proto[0]) | ord(proto[1]) << 8) and meta == expect_meta
-    print(f"[fake] handshake meta={meta} vflags={vflags} abatch={abatch} feat={feat} -> {'OK' if ok else 'REFUS'}")
+    print(f"[fake] handshake meta={meta} vflags={vflags} abatch={abatch} feat={feat} -> {'OK' if ok else 'REJECTED'}")
     code = 6 if ok else 4
     if proto == "03":
         conn.sendall(struct.pack("<I", code) + struct.pack("<I", 0xFFFFFFFF) + b"\x00" * 64)
@@ -70,7 +70,7 @@ def serve_video(port, aus, proto):
     srv.listen(1)
     while True:
         conn, addr = srv.accept()
-        print(f"[fake] video : client {addr}")
+        print(f"[fake] video: client {addr}")
         try:
             ok, _ = handshake(conn, proto, 1)
             if not ok:
@@ -86,7 +86,7 @@ def serve_video(port, aus, proto):
                 if delay > 0:
                     time.sleep(delay)
         except (ConnectionError, OSError) as e:
-            print(f"[fake] video : deconnecte ({e})")
+            print(f"[fake] video: disconnected ({e})")
         finally:
             conn.close()
 
@@ -98,7 +98,7 @@ def serve_audio(port, proto):
     srv.listen(1)
     while True:
         conn, addr = srv.accept()
-        print(f"[fake] audio : client {addr}")
+        print(f"[fake] audio: client {addr}")
         try:
             ok, batch = handshake(conn, proto, 2)
             if not ok:
@@ -120,7 +120,7 @@ def serve_audio(port, proto):
                 if delay > 0:
                     time.sleep(delay)
         except (ConnectionError, OSError) as e:
-            print(f"[fake] audio : deconnecte ({e})")
+            print(f"[fake] audio: disconnected ({e})")
         finally:
             conn.close()
 
@@ -147,7 +147,7 @@ def main():
 
     with open(args.h264, "rb") as f:
         aus = split_access_units(f.read())
-    print(f"[fake] {len(aus)} images chargees, protocole {args.proto}")
+    print(f"[fake] {len(aus)} frames loaded, protocol {args.proto}")
 
     threading.Thread(target=serve_video, args=(9911, aus, args.proto), daemon=True).start()
     threading.Thread(target=serve_audio, args=(9922, args.proto), daemon=True).start()
