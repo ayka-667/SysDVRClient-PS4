@@ -1,0 +1,2 @@
+#pragma once
+#define ORBIS_USER_SERVICE_USER_ID_SYSTEM 0xFF

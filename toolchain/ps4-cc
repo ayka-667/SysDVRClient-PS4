@@ -1,0 +1,14 @@
+#!/bin/sh
+# clang wrapper targeting the PS4 (OpenOrbis): compiles with -c/-E/-S, otherwise links a PS4 ELF.
+TC="${OO_PS4_TOOLCHAIN:-$HOME/ps4build/oo}"
+link=1
+for a in "$@"; do
+  case "$a" in -c|-E|-S|-M|-MM) link=0 ;; esac
+done
+CF="--target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -isysroot $TC -isystem $TC/include"
+if [ "$link" = 1 ]; then
+  exec clang $CF -fuse-ld=lld -nostdlib -Wl,-m,elf_x86_64 -Wl,-pie -Wl,--script,"$TC/link.x" -Wl,--eh-frame-hdr \
+    -L"$TC/lib" "$TC/lib/crt1.o" "$@" -lc -lkernel
+else
+  exec clang $CF "$@"
+fi
