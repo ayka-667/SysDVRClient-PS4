@@ -127,50 +127,51 @@ static int read_full(int fd, void *dst, size_t len, volatile bool *stop, bool al
     return 1;
 }
 
-int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t errlen)
+int sdvr_parse_hello(const uint8_t *hello, size_t len, const char *mode, uint16_t *proto_ver, char *err, size_t errlen)
 {
-    char hello[10];
-    if (read_full(fd, hello, sizeof(hello), NULL, false, 5) != 1) {
-        snprintf(err, errlen, "The Switch did not send the SysDVR hello");
+    if (len != SDVR_HELLO_SIZE || memcmp(hello, "SysDVR|", 7) != 0 || hello[9] != 0) {
+        snprintf(err, errlen, "Unexpected reply: is SysDVR in %s mode?", mode);
         return -1;
     }
 
-    if (memcmp(hello, "SysDVR|", 7) != 0 || hello[9] != 0) {
-        snprintf(err, errlen, "Unexpected reply: is SysDVR in TCP Bridge mode?");
-        return -1;
-    }
-
-    char v0 = hello[7], v1 = hello[8];
-    bool v2 = v0 == '0' && v1 == '2';
-    bool v3 = v0 == '0' && v1 == '3';
-    if (!v2 && !v3) {
+    char v0 = (char)hello[7], v1 = (char)hello[8];
+    if (v0 != '0' || (v1 != '2' && v1 != '3')) {
         snprintf(err, errlen, "Unsupported SysDVR protocol version (%c%c). Update SysDVR.", v0, v1);
         return -1;
     }
+    *proto_ver = (uint16_t)((uint8_t)v0 | ((uint8_t)v1 << 8));
+    return 0;
+}
 
-    SdvrHandshakeRequest req;
-    memset(&req, 0, sizeof(req));
-    req.Magic = SDVR_REQUEST_MAGIC;
-    req.ProtoVer = (uint16_t)((uint8_t)v0 | ((uint8_t)v1 << 8));
-    req.MetaFlags = opt->video ? 1 : 2;
-    req.VideoFlags = 2; // InjectPPSSPS, no NAL replay
-    req.AudioBatching = (uint8_t)opt->audio_batching;
-    if (v3 && opt->turn_off_screen)
-        req.FeatureFlags |= 1;
+static bool is_v3(uint16_t proto_ver)
+{
+    return (proto_ver >> 8) == '3';
+}
 
-    if (send(fd, &req, sizeof(req), 0) != (ssize_t)sizeof(req)) {
-        snprintf(err, errlen, "Could not send the handshake");
-        return -1;
-    }
+void sdvr_build_request(SdvrHandshakeRequest *req, uint16_t proto_ver, const SdvrHandshakeOptions *opt)
+{
+    memset(req, 0, sizeof(*req));
+    req->Magic = SDVR_REQUEST_MAGIC;
+    req->ProtoVer = proto_ver;
+    req->MetaFlags = (opt->video ? 1 : 0) | (opt->audio ? 2 : 0);
+    req->VideoFlags = 2; // InjectPPSSPS, no NAL replay
+    req->AudioBatching = (uint8_t)opt->audio_batching;
+    if (is_v3(proto_ver) && opt->turn_off_screen)
+        req->FeatureFlags |= 1;
+}
 
-    uint8_t resp[72];
-    size_t resp_len = v3 ? 72 : 4;
-    if (read_full(fd, resp, resp_len, NULL, false, 5) != 1) {
+size_t sdvr_response_size(uint16_t proto_ver)
+{
+    return is_v3(proto_ver) ? 72 : 4;
+}
+
+int sdvr_check_response(const uint8_t *resp, size_t len, char *err, size_t errlen)
+{
+    uint32_t code;
+    if (len < 4) {
         snprintf(err, errlen, "No handshake response");
         return -1;
     }
-
-    uint32_t code;
     memcpy(&code, resp, 4);
     if (code != SDVR_HANDSHAKE_OK) {
         if (code == 1)
@@ -182,6 +183,39 @@ int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t er
     return 0;
 }
 
+int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t errlen)
+{
+    uint8_t hello[SDVR_HELLO_SIZE];
+    if (read_full(fd, hello, sizeof(hello), NULL, false, 5) != 1) {
+        snprintf(err, errlen, "The Switch did not send the SysDVR hello");
+        return -1;
+    }
+
+    uint16_t ver;
+    if (sdvr_parse_hello(hello, sizeof(hello), "TCP Bridge", &ver, err, errlen) != 0)
+        return -1;
+
+    SdvrHandshakeRequest req;
+    sdvr_build_request(&req, ver, opt);
+    if (send(fd, &req, sizeof(req), 0) != (ssize_t)sizeof(req)) {
+        snprintf(err, errlen, "Could not send the handshake");
+        return -1;
+    }
+
+    uint8_t resp[72];
+    size_t resp_len = sdvr_response_size(ver);
+    if (read_full(fd, resp, resp_len, NULL, false, 5) != 1) {
+        snprintf(err, errlen, "No handshake response");
+        return -1;
+    }
+    return sdvr_check_response(resp, resp_len, err, errlen);
+}
+
+bool sdvr_header_valid(const SdvrPacketHeader *hdr)
+{
+    return hdr->Magic == SDVR_PACKET_MAGIC && hdr->DataSize <= SDVR_MAX_PAYLOAD;
+}
+
 int sdvr_read_header(int fd, SdvrPacketHeader *hdr, volatile bool *stop)
 {
     int rc = read_full(fd, hdr, sizeof(*hdr), stop, true, 10);
@@ -190,7 +224,7 @@ int sdvr_read_header(int fd, SdvrPacketHeader *hdr, volatile bool *stop)
 
     // resync if the header is corrupted: look for CC CC CC CC
     int resync_budget = 4 * 1024 * 1024;
-    while (hdr->Magic != SDVR_PACKET_MAGIC || hdr->DataSize > SDVR_MAX_PAYLOAD) {
+    while (!sdvr_header_valid(hdr)) {
         if (--resync_budget <= 0)
             return -1;
         memmove(hdr, ((uint8_t *)hdr) + 1, sizeof(*hdr) - 1);

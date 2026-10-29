@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <pthread.h>
 
-#define APP_VERSION "1.1"
+#define APP_VERSION "1.2"
 #define DATA_DIR    "/data/sysdvr-ps4"
 #define CONFIG_PATH DATA_DIR "/config.ini"
 #define LOG_PATH    DATA_DIR "/log.txt"
@@ -12,14 +12,17 @@
 // Bumped when the defaults change: older config files get the latency-related keys reset
 #define CONFIG_VERSION 2
 
+enum { SCALER_FAST, SCALER_SMOOTH, SCALER_SHARP };
+
 typedef struct {
+    bool usb;          // stream over the USB cable instead of the network
     char ip[64];       // empty = automatic discovery
     int  threads;      // H.264 decoder threads (1-6)
     bool fast;         // skip the deblocking filter (faster, slightly blockier)
     bool audio;        // enable sound
     bool fullscreen;   // stretch 720p to 1080p, otherwise 1:1 centred
     bool screen_off;   // turn off the Switch screen while streaming (SysDVR >= 6.1)
-    bool smooth;       // bilinear scaling (otherwise the faster fast-bilinear)
+    int  scaler;       // SCALER_*: fast bilinear, bilinear, or sharpened bicubic
     int  audio_batch;  // 0-3
     int  audio_buffer_ms;
     int  max_delay_ms; // video backlog above which frames are dropped to catch up
@@ -46,6 +49,7 @@ typedef struct {
 
     LinkState video_state;
     LinkState audio_state;
+    bool usb_connected; // a SysDVR Switch is plugged in over USB
     char message[256];
 
     // statistics

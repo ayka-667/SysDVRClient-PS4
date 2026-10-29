@@ -4,6 +4,7 @@
 #include "video.h"
 #include "audio.h"
 #include "sysdvr_proto.h"
+#include "usb.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -113,7 +114,7 @@ static void *discovery_thread(void *arg)
     (void)arg;
     while (!g_app.quit) {
         pthread_mutex_lock(&g_app.lock);
-        bool manual = g_app.cfg.ip[0] != 0;
+        bool manual = g_app.cfg.ip[0] != 0 || g_app.cfg.usb;
         bool streaming = g_app.video_state == LINK_STREAMING;
         pthread_mutex_unlock(&g_app.lock);
 
@@ -145,15 +146,16 @@ static void *discovery_thread(void *arg)
 // ---------------------------------------------------------------- menu
 
 enum {
-    MI_IP, MI_FULLSCREEN, MI_SMOOTH, MI_FAST, MI_THREADS, MI_MAX_DELAY, MI_AUDIO, MI_AUDIO_BUF, MI_SCREEN_OFF, MI_RECONNECT, MI_CLOSE, MI_COUNT
+    MI_CONNECTION, MI_IP, MI_FULLSCREEN, MI_SCALER, MI_FAST, MI_THREADS, MI_MAX_DELAY, MI_AUDIO, MI_AUDIO_BUF, MI_SCREEN_OFF, MI_RECONNECT, MI_CLOSE, MI_COUNT
 };
 
 static void menu_item_text(int i, const Config *c, char *out, size_t len)
 {
     switch (i) {
-    case MI_IP:         snprintf(out, len, "Switch IP: %s", c->ip[0] ? c->ip : "automatic"); break;
+    case MI_CONNECTION: snprintf(out, len, "Connection: %s", c->usb ? "USB cable" : "network (TCP Bridge)"); break;
+    case MI_IP:         snprintf(out, len, "Switch IP: %s%s", c->ip[0] ? c->ip : "automatic", c->usb ? " (not used over USB)" : ""); break;
     case MI_FULLSCREEN: snprintf(out, len, "Fullscreen: %s", c->fullscreen ? "on" : "off (native 720p)"); break;
-    case MI_SMOOTH:     snprintf(out, len, "Smooth scaling: %s", c->smooth ? "on" : "off (faster)"); break;
+    case MI_SCALER:     snprintf(out, len, "Scaling: %s", c->scaler == SCALER_SHARP ? "sharp (more CPU)" : c->scaler == SCALER_SMOOTH ? "smooth" : "fast"); break;
     case MI_FAST:       snprintf(out, len, "Fast decoding (lower quality): %s", c->fast ? "on" : "off"); break;
     case MI_THREADS:    snprintf(out, len, "Decoder threads: %d%s", c->threads, c->threads == 1 ? " (lowest latency)" : ""); break;
     case MI_MAX_DELAY:  snprintf(out, len, "Max video delay: %d ms", c->max_delay_ms); break;
@@ -260,7 +262,8 @@ static void ui_update(void)
         }
         break;
     case MI_FULLSCREEN: c->fullscreen = !c->fullscreen; break;
-    case MI_SMOOTH:     c->smooth = !c->smooth; break;
+    case MI_CONNECTION: c->usb = !c->usb; need_reconnect = true; break;
+    case MI_SCALER:     c->scaler = (c->scaler + dir + 3) % 3; break;
     case MI_MAX_DELAY:
         c->max_delay_ms += dir * 50;
         if (c->max_delay_ms < 50) c->max_delay_ms = 50;
@@ -359,7 +362,7 @@ static void draw_status_screen(uint32_t *fb)
 {
     char ip[64], serial[64], msg[256];
     LinkState vs, as;
-    bool manual, audio;
+    bool manual, audio, usb, usb_connected;
     pthread_mutex_lock(&g_app.lock);
     strcpy(ip, g_app.target_ip);
     strcpy(serial, g_app.serial);
@@ -368,6 +371,8 @@ static void draw_status_screen(uint32_t *fb)
     as = g_app.audio_state;
     manual = g_app.cfg.ip[0] != 0;
     audio = g_app.cfg.audio;
+    usb = g_app.cfg.usb;
+    usb_connected = g_app.usb_connected;
     pthread_mutex_unlock(&g_app.lock);
 
     gfx_clear(fb, COL_BG);
@@ -377,7 +382,15 @@ static void draw_status_screen(uint32_t *fb)
 
     char line[256];
     int y = 340;
-    if (!ip[0]) {
+    if (usb) {
+        if (vs == LINK_STREAMING) {
+            gfx_text_centered(fb, y, 5, COL_OK, "Connected to the Switch over USB");
+            gfx_text_centered(fb, y + 80, 4, COL_WARN, "Waiting for video: start a game on the Switch");
+        } else {
+            gfx_text_centered(fb, y, 5, usb_connected ? COL_TEXT : COL_WARN,
+                              usb_connected ? "Switch found on USB, connecting..." : "Plug the Switch into the PS4 with a USB cable");
+        }
+    } else if (!ip[0]) {
         gfx_text_centered(fb, y, 5, COL_WARN, "Searching for the Switch on the network...");
     } else if (vs == LINK_STREAMING) {
         snprintf(line, sizeof(line), "Connected to %s", ip);
@@ -392,16 +405,23 @@ static void draw_status_screen(uint32_t *fb)
         gfx_text_centered(fb, y + 150, 3, COL_DIM, msg);
 
     snprintf(line, sizeof(line), "Mode: %s   |   Video: %s   |   Sound: %s%s%s",
-             manual ? "manual IP" : "auto discovery", state_name(vs), audio ? state_name(as) : "off",
+             usb ? "USB" : manual ? "manual IP" : "auto discovery", state_name(vs), audio ? state_name(as) : "off",
              serial[0] ? "   |   Switch: " : "", serial);
     gfx_text_centered(fb, y + 200, 3, COL_DIM, line);
 
     int bx = 300, by = 650;
     gfx_rect(fb, bx - 30, by - 30, SCREEN_W - 2 * (bx - 30), 300, COL_PANEL);
-    gfx_text(fb, bx, by, 4, COL_TEXT, "1. On the Switch: open SysDVR Settings and pick TCP Bridge mode");
-    gfx_text(fb, bx, by + 60, 4, COL_TEXT, "2. Connect the Switch and the PS4 to the same network (same router)");
-    gfx_text(fb, bx, by + 120, 4, COL_TEXT, "3. Start a game on the Switch: the picture shows up here");
-    gfx_text(fb, bx, by + 180, 3, COL_DIM, "If the Switch is not found, enter its IP in OPTIONS > Switch IP");
+    if (usb) {
+        gfx_text(fb, bx, by, 4, COL_TEXT, "1. On the Switch: open SysDVR Settings and pick USB mode");
+        gfx_text(fb, bx, by + 60, 4, COL_TEXT, "2. Plug the Switch into a PS4 USB port (USB-C to USB-A data cable)");
+        gfx_text(fb, bx, by + 120, 4, COL_TEXT, "3. Start a game on the Switch: the picture shows up here");
+        gfx_text(fb, bx, by + 180, 3, COL_DIM, "To stream over Wi-Fi instead: OPTIONS > Connection");
+    } else {
+        gfx_text(fb, bx, by, 4, COL_TEXT, "1. On the Switch: open SysDVR Settings and pick TCP Bridge mode");
+        gfx_text(fb, bx, by + 60, 4, COL_TEXT, "2. Connect the Switch and the PS4 to the same network (same router)");
+        gfx_text(fb, bx, by + 120, 4, COL_TEXT, "3. Start a game on the Switch: the picture shows up here");
+        gfx_text(fb, bx, by + 180, 3, COL_DIM, "Not found? Enter its IP in OPTIONS > Switch IP, or use OPTIONS > Connection: USB");
+    }
 
     gfx_text_centered(fb, 1010, 3, COL_DIM, "OPTIONS: settings     X: reconnect     TRIANGLE: stats     SQUARE: fullscreen");
 }
@@ -479,6 +499,8 @@ int main(void)
 
     if (!video_start())
         app_set_message("Could not start the video threads");
+    if (!usb_start())
+        log_printf("Could not start the USB thread");
     if (!audio_start())
         log_printf("Audio unavailable");
 
@@ -500,7 +522,7 @@ int main(void)
         pthread_mutex_lock(&g_app.lock);
         bool streaming = g_app.video_state == LINK_STREAMING;
         bool fullscreen = g_app.cfg.fullscreen;
-        bool smooth = g_app.cfg.smooth;
+        int scaler = g_app.cfg.scaler;
         pthread_mutex_unlock(&g_app.lock);
 
         bool showing_video = streaming && g_app.last_frame_us && (t - g_app.last_frame_us) < 3000000;
@@ -512,7 +534,7 @@ int main(void)
         if (showing_video) {
             // show every new frame as soon as it is decoded; redraw the last one when the menu changes
             bool force = input || t - last_flip > 100000;
-            if ((force || video_has_new_frame()) && video_render(fb, fullscreen, smooth, force)) {
+            if ((force || video_has_new_frame()) && video_render(fb, fullscreen, scaler, force)) {
                 draw_overlays(fb);
                 gfx_flip();
                 last_flip = t;
@@ -521,7 +543,7 @@ int main(void)
             }
         } else if (input || t - last_flip > 50000) {
             // also drains leftover frames
-            video_render(fb, fullscreen, smooth, false);
+            video_render(fb, fullscreen, scaler, false);
             draw_status_screen(fb);
             draw_overlays(fb);
             gfx_flip();

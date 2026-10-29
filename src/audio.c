@@ -98,6 +98,22 @@ static void ring_reset(void)
     pthread_mutex_unlock(&g_ring_lock);
 }
 
+// one Switch packet is 1024 * (1 + batch) samples; allow two of them on top of the target before dropping
+static size_t packet_headroom(int audio_batch)
+{
+    return 2 * ms_to_bytes(1000 * 1024 * (1 + audio_batch) / SAMPLE_RATE) + ms_to_bytes(20);
+}
+
+void audio_usb_begin(void)
+{
+    ring_reset();
+}
+
+void audio_push_pcm(const uint8_t *data, uint32_t len)
+{
+    ring_push(data, len & ~(uint32_t)(BYTES_PER_FRAME - 1), ms_to_bytes(g_app.cfg.audio_buffer_ms), packet_headroom(g_app.cfg.audio_batch));
+}
+
 static void *audio_out_thread(void *arg)
 {
     (void)arg;
@@ -141,6 +157,11 @@ static void *audio_net_thread(void *arg)
         int gen = g_app.generation;
         pthread_mutex_unlock(&g_app.lock);
 
+        if (cfg.usb) {
+            // the USB thread feeds the audio itself
+            sleep_ms(200);
+            continue;
+        }
         if (!ip[0] || !cfg.audio) {
             set_state(LINK_IDLE);
             sleep_ms(200);
@@ -149,7 +170,7 @@ static void *audio_net_thread(void *arg)
 
         set_state(LINK_CONNECTING);
         int fd = sdvr_connect(ip, SDVR_PORT_AUDIO, 3000, err, sizeof(err));
-        if (fd >= 0 && sdvr_handshake(fd, &(SdvrHandshakeOptions){ .video = false, .audio_batching = cfg.audio_batch, .turn_off_screen = cfg.screen_off }, err, sizeof(err)) != 0) {
+        if (fd >= 0 && sdvr_handshake(fd, &(SdvrHandshakeOptions){ .audio = true, .audio_batching = cfg.audio_batch, .turn_off_screen = cfg.screen_off }, err, sizeof(err)) != 0) {
             sdvr_close(fd);
             fd = -1;
         }
@@ -166,11 +187,9 @@ static void *audio_net_thread(void *arg)
         set_state(LINK_STREAMING);
         ring_reset();
 
-        // one Switch packet is 1024 * (1 + batch) samples; allow two of them on top of the target before dropping
-        size_t packet = ms_to_bytes(1000 * 1024 * (1 + cfg.audio_batch) / SAMPLE_RATE);
         volatile bool stop = false;
         SdvrPacketHeader hdr;
-        while (!g_app.quit && g_app.generation == gen && g_app.cfg.audio) {
+        while (!g_app.quit && g_app.generation == gen && g_app.cfg.audio && !g_app.cfg.usb) {
             int rc = sdvr_read_packet(fd, &hdr, buf, &stop);
             if (rc < 0) {
                 log_printf("Audio: connection lost");
@@ -179,7 +198,7 @@ static void *audio_net_thread(void *arg)
             if (rc == 0)
                 continue;
             if ((hdr.MetaData & SDVR_META_AUDIO) && !(hdr.MetaData & SDVR_META_ERROR) && hdr.DataSize > 0)
-                ring_push(buf, hdr.DataSize & ~(uint32_t)(BYTES_PER_FRAME - 1), ms_to_bytes(g_app.cfg.audio_buffer_ms), 2 * packet + ms_to_bytes(20));
+                ring_push(buf, hdr.DataSize & ~(uint32_t)(BYTES_PER_FRAME - 1), ms_to_bytes(g_app.cfg.audio_buffer_ms), packet_headroom(cfg.audio_batch));
         }
 
         g_sock = -1;

@@ -4,7 +4,7 @@
 # Variables: OO_PS4_TOOLCHAIN (OpenOrbis toolchain), FFMPEG (PS4 FFmpeg build, see toolchain/build_ffmpeg.sh)
 
 TITLE       := SysDVR PS4
-VERSION     := 1.10
+VERSION     := 1.20
 TITLE_ID    := SDVR00001
 CONTENT_ID  := IV0000-SDVR00001_00-SYSDVRPS4CLIENT0
 
@@ -23,9 +23,9 @@ SRCS        := $(wildcard src/*.c)
 OBJS        := $(patsubst src/%.c,$(BUILD)/%.o,$(SRCS))
 
 CFLAGS      := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -Wno-unused-function \
-               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -I$(FFMPEG)/include
+               -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -Isrc/compat -I$(FFMPEG)/include
 LIBS        := $(FFMPEG)/lib/libavcodec.a $(FFMPEG)/lib/libswscale.a $(FFMPEG)/lib/libavutil.a \
-               -lc -lkernel -lSceVideoOut -lSceAudioOut -lScePad -lSceUserService -lSceSystemService -lSceSysmodule
+               -lc -lkernel -lSceVideoOut -lSceAudioOut -lScePad -lSceUserService -lSceSystemService -lSceSysmodule -lSceUsbd
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr -L$(TOOLCHAIN)/lib
 
 PKG_FILES   := eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png sce_sys/pic1.png sce_module/libc.prx sce_module/libSceFios2.prx
@@ -58,7 +58,7 @@ eboot.bin: $(BUILD)/sysdvr.elf
 $(BUILD)/sysdvr.elf: $(OBJS)
 	$(LD) $(OBJS) -o $@ $(LDFLAGS) $(LIBS) $(TOOLCHAIN)/lib/crt1.o
 
-$(BUILD)/%.o: src/%.c src/*.h | $(BUILD)
+$(BUILD)/%.o: src/%.c src/*.h src/compat/*.h | $(BUILD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILD):

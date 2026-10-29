@@ -40,6 +40,9 @@ static int g_session;
 static bool g_wait_key;
 static uint64_t g_wait_key_since;
 
+static uint64_t g_last_key_us;
+static int g_keys_logged;
+
 // best (smallest) local arrival time minus Switch timestamp seen this session
 static volatile int64_t g_clock_offset;
 
@@ -80,6 +83,8 @@ static void queue_new_session(void)
     g_session++;
     g_wait_key = false;
     g_clock_offset = INT64_MAX;
+    g_last_key_us = 0;
+    g_keys_logged = 0;
     pthread_mutex_unlock(&g_queue_lock);
 }
 
@@ -159,13 +164,69 @@ static bool is_keyframe(const uint8_t *d, size_t n)
     return false;
 }
 
-// ---------------------------------------------------------------- network thread
+// ---------------------------------------------------------------- network thread (TCP) and USB entry points
 
 static void set_state(LinkState s)
 {
     pthread_mutex_lock(&g_app.lock);
     g_app.video_state = s;
     pthread_mutex_unlock(&g_app.lock);
+}
+
+// Everything after a packet has been received, shared by TCP and USB. data is the payload; pkt (video only) owns a copy of it.
+static void handle_packet(const SdvrPacketHeader *hdr, const uint8_t *data, AVPacket *pkt)
+{
+    uint64_t t = now_us();
+    g_app.last_packet_us = t;
+    g_app.video_bytes += hdr->DataSize + sizeof(*hdr);
+
+    if (hdr->MetaData & SDVR_META_ERROR) {
+        char msg[200];
+        sdvr_format_error(data, hdr->DataSize, msg, sizeof(msg));
+        app_set_message("Switch: %s", msg);
+        av_packet_free(&pkt);
+        return;
+    }
+    if (!pkt)
+        return;
+
+    int64_t off = (int64_t)t - (int64_t)hdr->Timestamp;
+    if (off < g_clock_offset)
+        g_clock_offset = off;
+
+    pkt->pts = pkt->dts = (int64_t)hdr->Timestamp;
+    bool key = is_keyframe(pkt->data, (size_t)pkt->size);
+    if (key) {
+        if (g_last_key_us && g_keys_logged < 5) {
+            log_printf("Keyframe interval: %d ms", (int)((t - g_last_key_us) / 1000));
+            g_keys_logged++;
+        }
+        g_last_key_us = t;
+    }
+    queue_push(pkt, key, g_app.cfg.max_delay_ms);
+}
+
+static bool is_video_packet(const SdvrPacketHeader *hdr)
+{
+    return (hdr->MetaData & SDVR_META_VIDEO) && !(hdr->MetaData & (SDVR_META_REPLAY | SDVR_META_ERROR)) && hdr->DataSize > 0;
+}
+
+void video_usb_begin(void)
+{
+    queue_new_session();
+}
+
+void video_usb_packet(const SdvrPacketHeader *hdr, const uint8_t *data)
+{
+    AVPacket *pkt = NULL;
+    if (is_video_packet(hdr)) {
+        pkt = av_packet_alloc();
+        if (!pkt || av_new_packet(pkt, (int)hdr->DataSize) < 0)
+            av_packet_free(&pkt);
+        else
+            memcpy(pkt->data, data, hdr->DataSize);
+    }
+    handle_packet(hdr, data, pkt);
 }
 
 static void *video_net_thread(void *arg)
@@ -183,6 +244,11 @@ static void *video_net_thread(void *arg)
         int gen = g_app.generation;
         pthread_mutex_unlock(&g_app.lock);
 
+        if (cfg.usb) {
+            // the USB thread does the streaming
+            sleep_ms(200);
+            continue;
+        }
         if (!ip[0]) {
             set_state(LINK_IDLE);
             sleep_ms(200);
@@ -191,7 +257,7 @@ static void *video_net_thread(void *arg)
 
         set_state(LINK_CONNECTING);
         int fd = sdvr_connect(ip, SDVR_PORT_VIDEO, 3000, err, sizeof(err));
-        if (fd >= 0 && sdvr_handshake(fd, &(SdvrHandshakeOptions){ .video = true, .audio_batching = cfg.audio_batch, .turn_off_screen = cfg.screen_off }, err, sizeof(err)) != 0) {
+        if (fd >= 0 && sdvr_handshake(fd, &(SdvrHandshakeOptions){ .video = true, .audio = false, .audio_batching = cfg.audio_batch, .turn_off_screen = cfg.screen_off }, err, sizeof(err)) != 0) {
             sdvr_close(fd);
             fd = -1;
         }
@@ -210,10 +276,8 @@ static void *video_net_thread(void *arg)
         set_state(LINK_STREAMING);
 
         volatile bool stop = false;
-        uint64_t last_key_us = 0;
-        int keys_logged = 0;
         SdvrPacketHeader hdr;
-        while (!g_app.quit && g_app.generation == gen) {
+        while (!g_app.quit && g_app.generation == gen && !g_app.cfg.usb) {
             int rc = sdvr_read_header(fd, &hdr, &stop);
             if (rc < 0) {
                 app_set_message("Video: connection lost, reconnecting...");
@@ -222,7 +286,7 @@ static void *video_net_thread(void *arg)
             if (rc == 0)
                 continue; // no data (no game running?)
 
-            bool is_video = (hdr.MetaData & SDVR_META_VIDEO) && !(hdr.MetaData & (SDVR_META_REPLAY | SDVR_META_ERROR)) && hdr.DataSize > 0;
+            bool is_video = is_video_packet(&hdr);
             AVPacket *pkt = NULL;
             uint8_t *dst = scratch;
             if (is_video) {
@@ -240,33 +304,7 @@ static void *video_net_thread(void *arg)
                 break;
             }
 
-            uint64_t t = now_us();
-            g_app.last_packet_us = t;
-            g_app.video_bytes += hdr.DataSize + sizeof(hdr);
-
-            if (hdr.MetaData & SDVR_META_ERROR) {
-                char msg[200];
-                sdvr_format_error(scratch, hdr.DataSize, msg, sizeof(msg));
-                app_set_message("Switch: %s", msg);
-                continue;
-            }
-            if (!is_video)
-                continue;
-
-            int64_t off = (int64_t)t - (int64_t)hdr.Timestamp;
-            if (off < g_clock_offset)
-                g_clock_offset = off;
-
-            pkt->pts = pkt->dts = (int64_t)hdr.Timestamp;
-            bool key = is_keyframe(pkt->data, (size_t)pkt->size);
-            if (key) {
-                if (last_key_us && keys_logged < 5) {
-                    log_printf("Keyframe interval: %d ms", (int)((t - last_key_us) / 1000));
-                    keys_logged++;
-                }
-                last_key_us = t;
-            }
-            queue_push(pkt, key, g_app.cfg.max_delay_ms);
+            handle_packet(&hdr, dst, pkt);
         }
 
         g_sock = -1;
@@ -419,7 +457,7 @@ static void noop_free(void *opaque, uint8_t *data)
     (void)data;
 }
 
-bool video_render(uint32_t *fb, bool fullscreen, bool smooth, bool force)
+bool video_render(uint32_t *fb, bool fullscreen, int scaler, bool force)
 {
     pthread_mutex_lock(&g_frame_lock);
     bool has = g_has_new_frame;
@@ -454,7 +492,7 @@ bool video_render(uint32_t *fb, bool fullscreen, bool smooth, bool force)
     dst_w &= ~1;
     dst_h &= ~1;
 
-    int flags = smooth ? SWS_BILINEAR : SWS_FAST_BILINEAR;
+    int flags = scaler == SCALER_SHARP ? SWS_BICUBIC : scaler == SCALER_SMOOTH ? SWS_BILINEAR : SWS_FAST_BILINEAR;
     if (!g_sws || g_sws_src_w != src->width || g_sws_src_h != src->height || g_sws_src_fmt != src->format ||
         g_sws_dst_w != dst_w || g_sws_dst_h != dst_h || g_sws_flags != flags) {
         if (g_sws)
@@ -467,6 +505,11 @@ bool video_render(uint32_t *fb, bool fullscreen, bool smooth, bool force)
         av_opt_set_int(g_sws, "dsth", dst_h, 0);
         av_opt_set_int(g_sws, "dst_format", AV_PIX_FMT_BGRA, 0);
         av_opt_set_int(g_sws, "sws_flags", flags, 0);
+        if (scaler == SCALER_SHARP) {
+            // B = 0, C = 0.75: a bicubic with a bit of sharpening, ~35% more expensive than bilinear
+            av_opt_set_double(g_sws, "param0", 0.0, 0);
+            av_opt_set_double(g_sws, "param1", 0.75, 0);
+        }
         av_opt_set_int(g_sws, "threads", 3, 0);
         if (sws_init_context(g_sws, NULL, NULL) < 0) {
             log_printf("sws_init_context failed");

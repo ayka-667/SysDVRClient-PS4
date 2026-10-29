@@ -77,7 +77,7 @@ void config_defaults(Config *c)
     c->audio = true;
     c->fullscreen = true;
     c->screen_off = false;
-    c->smooth = true;
+    c->scaler = SCALER_SMOOTH;
     c->audio_batch = 0;
     c->audio_buffer_ms = 60;
     c->max_delay_ms = 150;
@@ -132,7 +132,9 @@ void config_load(Config *c)
         else if (!strcmp(key, "fast")) c->fast = parse_bool(val);
         else if (!strcmp(key, "audio")) c->audio = parse_bool(val);
         else if (!strcmp(key, "fullscreen")) c->fullscreen = parse_bool(val);
-        else if (!strcmp(key, "smooth")) c->smooth = parse_bool(val);
+        else if (!strcmp(key, "smooth")) c->scaler = parse_bool(val) ? SCALER_SMOOTH : SCALER_FAST; // 1.1 key
+        else if (!strcmp(key, "scaler")) c->scaler = !strcmp(val, "sharp") ? SCALER_SHARP : !strcmp(val, "fast") ? SCALER_FAST : SCALER_SMOOTH;
+        else if (!strcmp(key, "connection")) c->usb = !strcmp(val, "usb");
         else if (!strcmp(key, "screen_off")) c->screen_off = parse_bool(val);
         else if (!strcmp(key, "audio_batch")) c->audio_batch = clampi(atoi(val), 0, 3);
         else if (!strcmp(key, "audio_buffer_ms")) c->audio_buffer_ms = clampi(atoi(val), 20, 500);
@@ -162,7 +164,9 @@ void config_save(const Config *c)
     }
     fprintf(f, "# SysDVR-PS4 configuration\n");
     fprintf(f, "config_version = %d\n", CONFIG_VERSION);
-    fprintf(f, "# ip = Switch IP address, or auto for automatic discovery\n");
+    fprintf(f, "# connection = network (SysDVR in TCP Bridge mode) or usb (SysDVR in USB mode, cable plugged into the PS4)\n");
+    fprintf(f, "connection = %s\n", c->usb ? "usb" : "network");
+    fprintf(f, "# ip = Switch IP address, or auto for automatic discovery (network only)\n");
     fprintf(f, "ip = %s\n", c->ip[0] ? c->ip : "auto");
     fprintf(f, "# video decoder threads (1-6). Each extra thread decodes faster but adds ~33 ms of latency\n");
     fprintf(f, "threads = %d\n", c->threads);
@@ -170,8 +174,8 @@ void config_save(const Config *c)
     fprintf(f, "fast = %d\n", c->fast);
     fprintf(f, "audio = %d\n", c->audio);
     fprintf(f, "fullscreen = %d\n", c->fullscreen);
-    fprintf(f, "# smooth = 0 uses a cheaper scaler\n");
-    fprintf(f, "smooth = %d\n", c->smooth);
+    fprintf(f, "# scaler = fast, smooth (bilinear) or sharp (sharpened bicubic, uses more CPU)\n");
+    fprintf(f, "scaler = %s\n", c->scaler == SCALER_SHARP ? "sharp" : c->scaler == SCALER_FAST ? "fast" : "smooth");
     fprintf(f, "# turn off the Switch screen while streaming (needs SysDVR 6.1+)\n");
     fprintf(f, "screen_off = %d\n", c->screen_off);
     fprintf(f, "# audio packets batched by the Switch (0-3). 0 = lowest latency\n");

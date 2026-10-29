@@ -2,7 +2,7 @@
 
 **Play your Nintendo Switch on your TV through a jailbroken PS4, no dock needed.**
 
-SysDVR-PS4 is a PS4 homebrew port of the [SysDVR](https://github.com/exelix11/SysDVR) client. The Switch runs the SysDVR sysmodule and streams its screen and sound over Wi-Fi. The PS4 receives the stream, decodes it and shows it on the TV it's plugged into.
+SysDVR-PS4 is a PS4 homebrew port of the [SysDVR](https://github.com/exelix11/SysDVR) client. The Switch runs the SysDVR sysmodule and streams its screen and sound over Wi-Fi or a USB cable. The PS4 receives the stream, decodes it and shows it on the TV it's plugged into.
 
 ```
  ┌──────────────┐   Wi-Fi / LAN    ┌──────────────┐   HDMI   ┌──────┐
@@ -18,11 +18,12 @@ SysDVR-PS4 is a PS4 homebrew port of the [SysDVR](https://github.com/exelix11/Sy
 
 ## Features
 
+- 🔌 **Wi-Fi or USB cable:** stream over the network (TCP Bridge) or plug the Switch straight into a PS4 USB port
 - 📡 **Automatic discovery:** finds the Switch on your network (SysDVR's UDP broadcast), no IP needed
 - 🎮 **Manual IP entry** with the controller if your network blocks broadcasts
 - 🎞️ **720p ~30 fps H.264**, software decoding (FFmpeg, multithreaded, SSE/AVX optimised for the PS4's Jaguar CPU)
 - ⚡ **Low latency:** the socket is always drained on its own thread, and if decoding falls behind the app skips to the next keyframe instead of piling up delay
-- 🖥️ **Fullscreen 1080p** (scaled) or **1:1 720p**
+- 🖥️ **Fullscreen 1080p** (scaled) or **1:1 720p**, with a **Sharp** scaling mode (sharpened bicubic)
 - 🔊 **Audio**, 48 kHz stereo PCM with a low-latency jitter buffer
 - 🔁 **Auto-reconnects** if the Wi-Fi drops or the Switch goes to sleep
 - 💡 Option to **turn off the Switch's screen** while streaming (SysDVR 6.1+)
@@ -33,11 +34,12 @@ SysDVR-PS4 is a PS4 homebrew port of the [SysDVR](https://github.com/exelix11/Sy
 
 ### Switch
 - A Switch with custom firmware (Atmosphère) and the **[SysDVR](https://github.com/exelix11/SysDVR/releases) sysmodule** installed (5.x / 6.x, protocol `02` or `03`).
-- SysDVR set to **TCP Bridge** mode (network). USB mode and "Simple network / RTSP" mode **won't work**.
+- SysDVR set to **TCP Bridge** mode (network) or **USB** mode (cable). "Simple network / RTSP" mode **won't work**.
 
 ### PS4
 - A jailbroken PS4 (GoldHEN or similar) that can install **fake PKGs** (debug settings → Package Installer).
-- Connected to the **same local network** as the Switch. Wired Ethernet on the PS4 is recommended.
+- Network mode: connected to the **same local network** as the Switch. Wired Ethernet on the PS4 is recommended.
+- USB mode: a USB-C to USB-A **data** cable (some charge-only cables have no data wires).
 
 ## Installation
 
@@ -48,10 +50,23 @@ SysDVR-PS4 is a PS4 homebrew port of the [SysDVR](https://github.com/exelix11/Sy
 
 ## Usage
 
+### Over the network (default)
+
 1. **On the Switch:** open the *SysDVR Settings* homebrew and choose **TCP Bridge**. Reboot if it asks you to.
 2. Make sure the Switch and the PS4 are on the **same Wi-Fi network / router**.
 3. **On the PS4:** start *SysDVR PS4*. It searches for the Switch and connects on its own.
 4. **Launch a game on the Switch.** The picture appears on the TV.
+
+### Over a USB cable
+
+1. **On the Switch:** open *SysDVR Settings* and choose **USB**. Reboot if it asks you to.
+2. Plug the Switch into a PS4 USB port.
+3. **On the PS4:** start *SysDVR PS4*, press **OPTIONS** and set **Connection** to **USB cable**. The setting is saved.
+4. **Launch a game on the Switch.**
+
+USB avoids Wi-Fi drops and interference. The PS4 port charges the Switch, but slowly.
+
+> ⚠️ USB mode is **experimental**: it follows SysDVR's USB protocol (device `18D1:4EE0`, one bulk transfer per packet) through the PS4's `sceUsbd` library, but has not been confirmed on hardware yet. If it doesn't connect, please open an issue with your `log.txt`.
 
 > SysDVR only captures **games**. The Switch home menu and some applets are not streamed, so a black or "waiting" screen is normal until a game is running. A few games block capture entirely.
 
@@ -75,10 +90,11 @@ The file is created on first launch. Edit it over FTP or change the values from 
 
 | Key | Default | Description |
 |---|---|---|
-| `ip` | `auto` | Switch IP address, or `auto` for discovery |
+| `connection` | `network` | `network` (SysDVR in TCP Bridge mode) or `usb` (SysDVR in USB mode, cable plugged into the PS4) |
+| `ip` | `auto` | Switch IP address, or `auto` for discovery (network only) |
 | `threads` | `2` | H.264 decoder threads (1–6). Each extra thread decodes faster but adds about 33 ms (one frame) of latency. `1` gives the lowest latency if your PS4 keeps up. |
 | `fast` | `0` | `1` skips the deblocking filter. Much faster decoding, slightly blockier picture. It is also switched on automatically while the decoder is catching up. |
-| `smooth` | `1` | Bilinear scaling. `0` uses the cheaper fast-bilinear scaler. |
+| `scaler` | `smooth` | Scaling to 1080p: `fast` (fast bilinear), `smooth` (bilinear) or `sharp` (sharpened bicubic, ~35% more CPU than `smooth`) |
 | `max_delay_ms` | `150` | When decoded video falls this far behind, queued frames are dropped and decoding restarts at the next keyframe. |
 | `audio` | `1` | Enable sound |
 | `fullscreen` | `1` | Scale to 1080p (`0` = native 720p, centred) |
@@ -110,8 +126,10 @@ A log is written to `/data/sysdvr-ps4/log.txt`.
 | *"Unexpected reply: is SysDVR in TCP Bridge mode?"* | SysDVR is in USB or RTSP mode. Switch it to **TCP Bridge**. |
 | *"Unsupported SysDVR protocol version"* | Update SysDVR on the Switch to 5.5 or later. |
 | Connected but black screen | Launch a game. The home menu isn't captured. |
-| Video freezes for a moment now and then | The decoder fell behind and skipped to the next keyframe (`skipped` goes up in the stats). Turn on *Fast decoding*, set `threads` to 3, or turn off *Smooth scaling*. |
-| Choppy video, `skipped` stays at 0 | Network problem: use Ethernet on the PS4 and keep the Switch close to the router (5 GHz). |
+| Video freezes for a moment now and then | The decoder fell behind and skipped to the next keyframe (`skipped` goes up in the stats). Turn on *Fast decoding*, set `threads` to 3, or set *Scaling* to `fast`. |
+| Choppy video, `skipped` stays at 0 | Network problem: use Ethernet on the PS4 and keep the Switch close to the router (5 GHz), or switch to USB. |
+| USB: *"Plug the Switch into the PS4 with a USB cable"* stays on screen | SysDVR must be in **USB** mode (not TCP Bridge), and the cable must carry data. Try another PS4 port. |
+| `skipped` goes up with *Scaling: sharp* | Your PS4 is at its limit: use `smooth`. |
 | Too much latency | `threads = 1` (if `decode` stays well under 33 ms), lower `max_delay_ms` and `audio_buffer_ms`. |
 | Crackling sound | Raise `audio_buffer_ms` to 100–200. |
 
@@ -127,7 +145,8 @@ On the PS4 side:
 
 | Module | Role |
 |---|---|
-| `src/sysdvr_proto.c` | Discovery, connect with timeout, handshake (proto 02/03), packet reading and resync |
+| `src/sysdvr_proto.c` | Discovery, connect with timeout, handshake (proto 02/03, shared by TCP and USB), packet reading and resync |
+| `src/usb.c` | USB mode: finds the SysDVR device (`18D1:4EE0`, serial `SysDVR\|...`), handshake over bulk endpoints, then splits the multiplexed packets between video and audio |
 | `src/video.c` | Network thread (always drains the socket) → packet queue with catch-up (drops to the next keyframe when it gets older than `max_delay_ms`) → decoder thread, FFmpeg `libavcodec` H.264 (frame threads, deblocking skipped while behind) → `libswscale` YUV→BGRA scaling (sliced, multithreaded) written **directly** into the framebuffer |
 | `src/audio.c` | Network thread → ring buffer with latency control → `sceAudioOut` (256-sample grains) |
 | `src/gfx.c` | `sceVideoOut` triple-buffered 1920×1080 framebuffer (a new frame never waits for the previous vsync), text rendering with `stb_easy_font` |

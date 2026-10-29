@@ -60,7 +60,7 @@ int main(void)
     g_app.cfg.threads = 2;
     g_app.cfg.audio = true;
     g_app.cfg.fullscreen = true;
-    g_app.cfg.smooth = true;
+    g_app.cfg.scaler = SCALER_SMOOTH;
     g_app.cfg.audio_batch = 0;
     g_app.cfg.audio_buffer_ms = 60;
     g_app.cfg.max_delay_ms = 150;
@@ -84,7 +84,7 @@ int main(void)
     uint64_t delay_sum = 0, delay_n = 0;
     uint64_t t0 = now_us();
     while (now_us() - t0 < 8000000) {
-        if (video_has_new_frame() && video_render(fb, true, true, false)) {
+        if (video_has_new_frame() && video_render(fb, true, SCALER_SMOOTH, false)) {
             rendered++;
             // ignore the first second (connection, first keyframe)
             if (now_us() - t0 > 1000000) {

@@ -12,11 +12,16 @@
 #define SDVR_PACKET_MAGIC   0xCCCCCCCCu
 #define SDVR_REQUEST_MAGIC  0xAAAAAAAAu
 #define SDVR_HANDSHAKE_OK   6
+#define SDVR_HELLO_SIZE     10
 
 // Max packet payload: max(VbufSz, AbufSz * (1 + MaxABatching))
 #define SDVR_VBUF_SIZE      0x54000
 #define SDVR_ABUF_SIZE      0x1000
 #define SDVR_MAX_PAYLOAD    SDVR_VBUF_SIZE
+
+// USB: the Switch shows up as VID 18D1 / PID 4EE0 and sends one packet per bulk transfer
+#define SDVR_USB_VID        0x18D1
+#define SDVR_USB_PID        0x4EE0
 
 enum {
     SDVR_META_VIDEO    = 1 << 0,
@@ -52,6 +57,7 @@ _Static_assert(sizeof(SdvrHandshakeRequest) == 16, "handshake size");
 
 typedef struct {
     bool video;
+    bool audio;
     int  audio_batching;
     bool turn_off_screen;
 } SdvrHandshakeOptions;
@@ -63,7 +69,15 @@ extern const uint8_t SDVR_PPS[8];
 // TCP connect with timeout. Returns the fd or -1.
 int sdvr_connect(const char *ip, int port, int timeout_ms, char *err, size_t errlen);
 
-// Performs the handshake. Returns 0 on success.
+// Handshake building blocks, shared by TCP and USB.
+// Checks the 10-byte hello; mode is only used in the error message. Returns 0 on success.
+int sdvr_parse_hello(const uint8_t *hello, size_t len, const char *mode, uint16_t *proto_ver, char *err, size_t errlen);
+void sdvr_build_request(SdvrHandshakeRequest *req, uint16_t proto_ver, const SdvrHandshakeOptions *opt);
+size_t sdvr_response_size(uint16_t proto_ver);
+int sdvr_check_response(const uint8_t *resp, size_t len, char *err, size_t errlen);
+bool sdvr_header_valid(const SdvrPacketHeader *hdr);
+
+// Performs the whole handshake on a TCP socket. Returns 0 on success.
 int sdvr_handshake(int fd, const SdvrHandshakeOptions *opt, char *err, size_t errlen);
 
 // Reads the next packet header (resyncs on garbage).
