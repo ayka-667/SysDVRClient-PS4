@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "sysdvr_proto.h"
 #include "usb.h"
+#include "menu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,12 +80,6 @@ static bool pressed(uint32_t b) { return (g_pressed & b) != 0; }
 
 // ---------------------------------------------------------------- application state
 
-typedef enum { UI_MAIN, UI_MENU, UI_IPEDIT } UiMode;
-
-static UiMode g_ui = UI_MAIN;
-static int g_menu_sel;
-static int g_ip_octets[4];
-static int g_ip_sel;
 static bool g_show_stats;
 static uint64_t g_hint_until;
 
@@ -143,158 +138,48 @@ static void *discovery_thread(void *arg)
     return NULL;
 }
 
-// ---------------------------------------------------------------- menu
+// ---------------------------------------------------------------- input
 
-enum {
-    MI_CONNECTION, MI_IP, MI_FULLSCREEN, MI_SCALER, MI_FAST, MI_THREADS, MI_MAX_DELAY, MI_AUDIO, MI_AUDIO_BUF, MI_SCREEN_OFF, MI_RECONNECT, MI_CLOSE, MI_COUNT
-};
-
-static void menu_item_text(int i, const Config *c, char *out, size_t len)
+static uint32_t pad_keys(void)
 {
-    switch (i) {
-    case MI_CONNECTION: snprintf(out, len, "Connection: %s", c->usb ? "USB cable" : "network (TCP Bridge)"); break;
-    case MI_IP:         snprintf(out, len, "Switch IP: %s%s", c->ip[0] ? c->ip : "automatic", c->usb ? " (not used over USB)" : ""); break;
-    case MI_FULLSCREEN: snprintf(out, len, "Fullscreen: %s", c->fullscreen ? "on" : "off (native 720p)"); break;
-    case MI_SCALER:     snprintf(out, len, "Scaling: %s", c->scaler == SCALER_SHARP ? "sharp (more CPU)" : c->scaler == SCALER_SMOOTH ? "smooth" : "fast"); break;
-    case MI_FAST:       snprintf(out, len, "Fast decoding (lower quality): %s", c->fast ? "on" : "off"); break;
-    case MI_THREADS:    snprintf(out, len, "Decoder threads: %d%s", c->threads, c->threads == 1 ? " (lowest latency)" : ""); break;
-    case MI_MAX_DELAY:  snprintf(out, len, "Max video delay: %d ms", c->max_delay_ms); break;
-    case MI_AUDIO:      snprintf(out, len, "Sound: %s", c->audio ? "on" : "off"); break;
-    case MI_AUDIO_BUF:  snprintf(out, len, "Audio buffer: %d ms", c->audio_buffer_ms); break;
-    case MI_SCREEN_OFF: snprintf(out, len, "Turn off Switch screen: %s", c->screen_off ? "on" : "off"); break;
-    case MI_RECONNECT:  snprintf(out, len, "Reconnect"); break;
-    case MI_CLOSE:      snprintf(out, len, "Close menu"); break;
-    }
-}
-
-static void ip_editor_open(void)
-{
-    char src[64];
-    pthread_mutex_lock(&g_app.lock);
-    strcpy(src, g_app.cfg.ip[0] ? g_app.cfg.ip : (g_app.target_ip[0] ? g_app.target_ip : "192.168.1.10"));
-    pthread_mutex_unlock(&g_app.lock);
-
-    int a = 192, b = 168, c = 1, d = 10;
-    sscanf(src, "%d.%d.%d.%d", &a, &b, &c, &d);
-    g_ip_octets[0] = a; g_ip_octets[1] = b; g_ip_octets[2] = c; g_ip_octets[3] = d;
-    g_ip_sel = 3;
-    g_ui = UI_IPEDIT;
+    static const struct { uint32_t pad, key; } MAP[] = {
+        { ORBIS_PAD_BUTTON_UP, KEY_UP }, { ORBIS_PAD_BUTTON_DOWN, KEY_DOWN },
+        { ORBIS_PAD_BUTTON_LEFT, KEY_LEFT }, { ORBIS_PAD_BUTTON_RIGHT, KEY_RIGHT },
+        { ORBIS_PAD_BUTTON_CROSS, KEY_CONFIRM }, { ORBIS_PAD_BUTTON_CIRCLE, KEY_BACK },
+        { ORBIS_PAD_BUTTON_SQUARE, KEY_ALT }, { ORBIS_PAD_BUTTON_L1, KEY_L1 },
+        { ORBIS_PAD_BUTTON_R1, KEY_R1 }, { ORBIS_PAD_BUTTON_OPTIONS, KEY_MENU },
+    };
+    uint32_t keys = 0;
+    for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++)
+        if (g_pressed & MAP[i].pad)
+            keys |= MAP[i].key;
+    return keys;
 }
 
 static void ui_update(void)
 {
-    if (g_ui == UI_MAIN) {
-        if (pressed(ORBIS_PAD_BUTTON_OPTIONS)) {
-            g_ui = UI_MENU;
-            g_menu_sel = 0;
+    uint32_t keys = pad_keys();
+    if (menu_is_open()) {
+        switch (menu_input(keys)) {
+        case MENU_RECONNECT:      reconnect(); break;
+        case MENU_TARGET_CHANGED: apply_target_from_config(); break;
+        case MENU_NONE:           break;
         }
-        if (pressed(ORBIS_PAD_BUTTON_TRIANGLE))
-            g_show_stats = !g_show_stats;
-        if (pressed(ORBIS_PAD_BUTTON_SQUARE)) {
-            pthread_mutex_lock(&g_app.lock);
-            g_app.cfg.fullscreen = !g_app.cfg.fullscreen;
-            pthread_mutex_unlock(&g_app.lock);
-            config_save(&g_app.cfg);
-        }
-        if (pressed(ORBIS_PAD_BUTTON_CROSS) && g_app.video_state != LINK_STREAMING)
-            reconnect();
         return;
     }
 
-    if (g_ui == UI_IPEDIT) {
-        if (pressed(ORBIS_PAD_BUTTON_LEFT))  g_ip_sel = (g_ip_sel + 3) % 4;
-        if (pressed(ORBIS_PAD_BUTTON_RIGHT)) g_ip_sel = (g_ip_sel + 1) % 4;
-        int delta = 0;
-        if (pressed(ORBIS_PAD_BUTTON_UP))   delta += 1;
-        if (pressed(ORBIS_PAD_BUTTON_DOWN)) delta -= 1;
-        if (pressed(ORBIS_PAD_BUTTON_R1))   delta += 10;
-        if (pressed(ORBIS_PAD_BUTTON_L1))   delta -= 10;
-        if (delta)
-            g_ip_octets[g_ip_sel] = (g_ip_octets[g_ip_sel] + delta + 256) % 256;
-
-        if (pressed(ORBIS_PAD_BUTTON_CROSS)) {
-            pthread_mutex_lock(&g_app.lock);
-            snprintf(g_app.cfg.ip, sizeof(g_app.cfg.ip), "%d.%d.%d.%d", g_ip_octets[0], g_ip_octets[1], g_ip_octets[2], g_ip_octets[3]);
-            pthread_mutex_unlock(&g_app.lock);
-            config_save(&g_app.cfg);
-            apply_target_from_config();
-            g_ui = UI_MENU;
-        }
-        if (pressed(ORBIS_PAD_BUTTON_SQUARE)) {
-            // back to automatic discovery
-            pthread_mutex_lock(&g_app.lock);
-            g_app.cfg.ip[0] = 0;
-            pthread_mutex_unlock(&g_app.lock);
-            config_save(&g_app.cfg);
-            apply_target_from_config();
-            g_ui = UI_MENU;
-        }
-        if (pressed(ORBIS_PAD_BUTTON_CIRCLE))
-            g_ui = UI_MENU;
-        return;
+    if (keys & KEY_MENU)
+        menu_open();
+    if (pressed(ORBIS_PAD_BUTTON_TRIANGLE))
+        g_show_stats = !g_show_stats;
+    if (keys & KEY_ALT) {
+        pthread_mutex_lock(&g_app.lock);
+        g_app.cfg.fullscreen = !g_app.cfg.fullscreen;
+        Config saved = g_app.cfg;
+        pthread_mutex_unlock(&g_app.lock);
+        config_save(&saved);
     }
-
-    // UI_MENU
-    if (pressed(ORBIS_PAD_BUTTON_UP))   g_menu_sel = (g_menu_sel + MI_COUNT - 1) % MI_COUNT;
-    if (pressed(ORBIS_PAD_BUTTON_DOWN)) g_menu_sel = (g_menu_sel + 1) % MI_COUNT;
-
-    int dir = 0;
-    if (pressed(ORBIS_PAD_BUTTON_RIGHT) || pressed(ORBIS_PAD_BUTTON_CROSS)) dir = 1;
-    if (pressed(ORBIS_PAD_BUTTON_LEFT)) dir = -1;
-
-    if (pressed(ORBIS_PAD_BUTTON_CIRCLE) || pressed(ORBIS_PAD_BUTTON_OPTIONS)) {
-        g_ui = UI_MAIN;
-        return;
-    }
-    if (!dir)
-        return;
-
-    bool need_reconnect = false;
-    bool cross = pressed(ORBIS_PAD_BUTTON_CROSS);
-    pthread_mutex_lock(&g_app.lock);
-    Config *c = &g_app.cfg;
-    switch (g_menu_sel) {
-    case MI_IP:
-        if (cross) {
-            pthread_mutex_unlock(&g_app.lock);
-            ip_editor_open();
-            return;
-        }
-        break;
-    case MI_FULLSCREEN: c->fullscreen = !c->fullscreen; break;
-    case MI_CONNECTION: c->usb = !c->usb; need_reconnect = true; break;
-    case MI_SCALER:     c->scaler = (c->scaler + dir + 3) % 3; break;
-    case MI_MAX_DELAY:
-        c->max_delay_ms += dir * 50;
-        if (c->max_delay_ms < 50) c->max_delay_ms = 50;
-        if (c->max_delay_ms > 1000) c->max_delay_ms = 1000;
-        break;
-    case MI_FAST:       c->fast = !c->fast; need_reconnect = true; break;
-    case MI_THREADS:
-        c->threads += dir;
-        if (c->threads < 1) c->threads = 6;
-        if (c->threads > 6) c->threads = 1;
-        need_reconnect = true;
-        break;
-    case MI_AUDIO:      c->audio = !c->audio; break;
-    case MI_AUDIO_BUF:
-        c->audio_buffer_ms += dir * 20;
-        if (c->audio_buffer_ms < 20) c->audio_buffer_ms = 20;
-        if (c->audio_buffer_ms > 400) c->audio_buffer_ms = 400;
-        break;
-    case MI_SCREEN_OFF: c->screen_off = !c->screen_off; need_reconnect = true; break;
-    case MI_RECONNECT:
-        if (cross) need_reconnect = true;
-        break;
-    case MI_CLOSE:
-        if (cross) g_ui = UI_MAIN;
-        break;
-    }
-    Config saved = *c;
-    pthread_mutex_unlock(&g_app.lock);
-
-    config_save(&saved);
-    if (need_reconnect)
+    if ((keys & KEY_CONFIRM) && g_app.video_state != LINK_STREAMING)
         reconnect();
 }
 
@@ -309,53 +194,6 @@ static const char *state_name(LinkState s)
     case LINK_ERROR: return "error";
     }
     return "?";
-}
-
-static void draw_menu(uint32_t *fb)
-{
-    Config c;
-    pthread_mutex_lock(&g_app.lock);
-    c = g_app.cfg;
-    pthread_mutex_unlock(&g_app.lock);
-
-    int w = 1100, h = 120 + MI_COUNT * 60 + 80;
-    int x = (SCREEN_W - w) / 2, y = (SCREEN_H - h) / 2;
-    gfx_rect(fb, x - 4, y - 4, w + 8, h + 8, COL_ACCENT);
-    gfx_rect(fb, x, y, w, h, COL_PANEL);
-    gfx_text(fb, x + 40, y + 30, 5, COL_TEXT, "Settings");
-
-    for (int i = 0; i < MI_COUNT; i++) {
-        char line[128];
-        menu_item_text(i, &c, line, sizeof(line));
-        int ly = y + 120 + i * 60;
-        if (i == g_menu_sel)
-            gfx_rect(fb, x + 20, ly - 10, w - 40, 52, COL_ACCENT);
-        gfx_text(fb, x + 40, ly, 4, COL_TEXT, line);
-    }
-    gfx_text(fb, x + 40, y + h - 55, 3, COL_DIM, "Up/Down: select   Left/Right/X: change   O: close");
-}
-
-static void draw_ip_editor(uint32_t *fb)
-{
-    int w = 1000, h = 420;
-    int x = (SCREEN_W - w) / 2, y = (SCREEN_H - h) / 2;
-    gfx_rect(fb, x - 4, y - 4, w + 8, h + 8, COL_ACCENT);
-    gfx_rect(fb, x, y, w, h, COL_PANEL);
-    gfx_text(fb, x + 40, y + 30, 5, COL_TEXT, "Switch IP address");
-
-    int bx = x + 90;
-    for (int i = 0; i < 4; i++) {
-        char t[8];
-        snprintf(t, sizeof(t), "%3d", g_ip_octets[i]);
-        int ox = bx + i * 210;
-        if (i == g_ip_sel)
-            gfx_rect(fb, ox - 15, y + 135, 170, 110, COL_ACCENT);
-        gfx_text(fb, ox, y + 150, 10, COL_TEXT, t);
-        if (i < 3)
-            gfx_text(fb, ox + 165, y + 150, 10, COL_TEXT, ".");
-    }
-    gfx_text(fb, x + 40, y + 290, 3, COL_DIM, "Left/Right: field   Up/Down: +-1   L1/R1: +-10");
-    gfx_text(fb, x + 40, y + 340, 3, COL_DIM, "X: save   SQUARE: automatic discovery   O: cancel");
 }
 
 static void draw_status_screen(uint32_t *fb)
@@ -463,10 +301,7 @@ static void draw_overlays(uint32_t *fb)
         gfx_rect(fb, (SCREEN_W - w) / 2, SCREEN_H - 90, w, 50, RGB(0, 0, 0));
         gfx_text_centered(fb, SCREEN_H - 78, 3, COL_TEXT, hint);
     }
-    if (g_ui == UI_MENU)
-        draw_menu(fb);
-    else if (g_ui == UI_IPEDIT)
-        draw_ip_editor(fb);
+    menu_draw(fb);
 }
 
 // ---------------------------------------------------------------- main

@@ -75,7 +75,13 @@ test:
 	@echo "==> Decoder too slow for the stream (must skip frames, not build up latency)"
 	python3 tests/fake_switch.py $(TEST_H264) & PID=$$!; sleep 1; cd $(BUILD) && SYSDVR_TEST_DECODE_DELAY_MS=45 ./harness; RC=$$?; kill $$PID; exit $$RC
 
+# Renders the settings menu to build/menu_*.ppm natively (no PS4 needed)
+preview:
+	mkdir -p $(BUILD)
+	gcc -O1 -Wall -Wno-unused-function -idirafter $(TOOLCHAIN)/include -o $(BUILD)/menu_preview tests/menu_preview.c src/menu.c src/draw.c -lpthread
+	cd $(BUILD) && ./menu_preview
+
 clean:
 	rm -rf $(BUILD) eboot.bin pkg.gp4 sce_sys/param.sfo $(CONTENT_ID).pkg
 
-.PHONY: all clean test
+.PHONY: all clean test preview

@@ -61,7 +61,7 @@ SysDVR-PS4 is a PS4 homebrew port of the [SysDVR](https://github.com/exelix11/Sy
 
 1. **On the Switch:** open *SysDVR Settings* and choose **USB**. Reboot if it asks you to.
 2. Plug the Switch into a PS4 USB port.
-3. **On the PS4:** start *SysDVR PS4*, press **OPTIONS** and set **Connection** to **USB cable**. The setting is saved.
+3. **On the PS4:** start *SysDVR PS4*, press **OPTIONS** and set the first setting, **Connection**, to **USB cable**. The setting is saved.
 4. **Launch a game on the Switch.**
 
 USB avoids Wi-Fi drops and interference. The PS4 port charges the Switch, but slowly.
@@ -80,7 +80,19 @@ USB avoids Wi-Fi drops and interference. The PS4 port charges the Switch, but sl
 | **✕ Cross** | Reconnect (when not connected) |
 | **PS button** | Return to the PS4 home screen |
 
-**Settings menu:** D-pad Up/Down to select, Left/Right or ✕ to change, ○ to close.
+**Settings menu** (OPTIONS): D-pad Up/Down to select, Left/Right or ✕ to change, ○ to close. A help line under the list explains the selected setting.
+
+| Setting | Choices |
+|---|---|
+| Connection | Wi-Fi / USB cable |
+| Switch IP | Automatic or a fixed address (Wi-Fi only, ✕ to edit) |
+| Picture | Fullscreen / Original size (720p) |
+| Performance | Low latency / Balanced / Best quality (sets decoder threads, deblocking, scaling, max delay and audio buffer together; shows *Custom* if `config.ini` was edited by hand) |
+| Sound | On / Off |
+| Switch screen | On / Off while streaming (SysDVR 6.1+) |
+| Reconnect | ✕ to reconnect |
+
+`make preview` renders the menu to `build/menu_*.ppm` on a PC.
 
 **IP editor:** Left/Right picks the octet, Up/Down changes it by 1, L1/R1 by 10, ✕ saves, □ switches back to automatic discovery, ○ cancels.
 
